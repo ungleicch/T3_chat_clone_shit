@@ -23,7 +23,7 @@ FIXED_VISION_MODEL = 'llava:latest'
 CHATS_DIR = Path('chats')
 ATTACHMENTS_DIR_NAME = 'attachments'
 CHATS_DIR.mkdir(exist_ok=True)
-TITLE_GENERATION_MODEL = 'gemma3:1b' 
+TITLE_GENERATION_MODEL = 'mistral:latest' 
 CONTEXT_WINDOW_MESSAGES = 20
 
 app = Flask(__name__)

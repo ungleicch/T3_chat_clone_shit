@@ -4,7 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Local AI Chat</title>
-    <!-- NEW: highlight.js CSS for a dark theme -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
@@ -19,10 +18,13 @@
                 </button>
             </div>
             <div class="search-container">
-                <svg class="search-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="1em" height="1em"><path fill="currentColor" d="M416 208c0 45.9-14.9 88.3-40 122.7L502.6 457.4c12.5 12.5 12.5 32.8 0 45.3s-32.8 12.5-45.3 0L330.7 376c-34.4 25.2-76.8 40-122.7 40C93.1 416 0 322.9 0 208S93.1 0 208 0S416 93.1 416 208zM208 352a144 144 0 1 0 0-288 144 144 0 1 0 0 288z"/></svg>
+                <!-- Use a label for better accessibility -->
+                <label for="search-threads-input" class="search-icon-label">
+                    <svg class="search-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="1em" height="1em"><path fill="currentColor" d="M416 208c0 45.9-14.9 88.3-40 122.7L502.6 457.4c12.5 12.5 12.5 32.8 0 45.3s-32.8 12.5-45.3 0L330.7 376c-34.4 25.2-76.8 40-122.7 40C93.1 416 0 322.9 0 208S93.1 0 208 0S416 93.1 416 208zM208 352a144 144 0 1 0 0-288 144 144 0 1 0 0 288z"/></svg>
+                </label>
                 <input type="text" id="search-threads-input" placeholder="Search threads...">
             </div>
-            <nav id="chat-list-nav">
+            <nav id="chat-list-nav" aria-label="Chat History">
                 <ul id="chat-list">
                     <!-- Chat list will be injected here by JS -->
                 </ul>
@@ -36,33 +38,33 @@
             </div>
             
             <footer id="input-area">
-                <div id="file-preview-area"></div>
-                <div id="main-input-container">
-                    <div class="input-form-container">
-                        <textarea id="prompt-input" placeholder="Type your message here..." rows="1"></textarea>
-                        <input type="file" id="file-input" multiple hidden>
-                        <button id="attach-btn" title="Attach Files">
-                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512" width="1em" height="1em"><path fill="currentColor" d="M364.2 83.8c-24.4-24.4-64-24.4-88.4 0l-184 184c-42.1 42.1-42.1 110.3 0 152.4s110.3 42.1 152.4 0l152-152c10.9-10.9 28.7-10.9 39.6 0s10.9 28.7 0 39.6l-152 152c-64.4 64.4-169 64.4-233.4 0s-64.4-169 0-233.4l184-184c46.7-46.7 122.5-46.7 169.2 0s46.7 122.5 0 169.2l-128 128c-10.9 10.9-28.7 10.9-39.6 0s-10.9-28.7 0-39.6l128-128c24.4-24.4 24.4-64 0-88.4z"/></svg>
-                        </button>
-                        <button type="submit" id="send-btn" form="chat-form" title="Send">
-                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512" width="1em" height="1em"><path fill="currentColor" d="M429.6 92.1c4.9-11.9 2.1-25.6-7-34.7s-22.8-11.9-34.7-7l-352 144c-14.2 5.8-22.2 20.8-19.3 35.8s16.1 25.8 31.4 25.8H224V432c0 15.3 10.8 28.4 25.8 31.4s30-5.1 35.8-19.3l144-352z"/></svg>
-                        </button>
+                <form id="chat-form" aria-label="Chat Input Form">
+                    <div id="file-preview-area"></div>
+                    <div id="main-input-container">
+                        <div class="input-form-container">
+                            <textarea id="prompt-input" placeholder="Type your message here..." rows="1" aria-label="Message Input"></textarea>
+                            <input type="file" id="file-input" multiple hidden>
+                            <button id="attach-btn" type="button" title="Attach Files" aria-label="Attach Files">
+                                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512" width="1em" height="1em"><path fill="currentColor" d="M364.2 83.8c-24.4-24.4-64-24.4-88.4 0l-184 184c-42.1 42.1-42.1 110.3 0 152.4s110.3 42.1 152.4 0l152-152c10.9-10.9 28.7-10.9 39.6 0s10.9 28.7 0 39.6l-152 152c-64.4 64.4-169 64.4-233.4 0s-64.4-169 0-233.4l184-184c46.7-46.7 122.5-46.7 169.2 0s46.7 122.5 0 169.2l-128 128c-10.9 10.9-28.7 10.9-39.6 0s-10.9-28.7 0-39.6l128-128c24.4-24.4 24.4-64 0-88.4z"/></svg>
+                            </button>
+                            <button type="submit" id="send-btn" title="Send" aria-label="Send Message">
+                                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512" width="1em" height="1em"><path fill="currentColor" d="M429.6 92.1c4.9-11.9 2.1-25.6-7-34.7s-22.8-11.9-34.7-7l-352 144c-14.2 5.8-22.2 20.8-19.3 35.8s16.1 25.8 31.4 25.8H224V432c0 15.3 10.8 28.4 25.8 31.4s30-5.1 35.8-19.3l144-352z"/></svg>
+                            </button>
+                        </div>
                     </div>
-                </div>
-                <div class="input-footer">
-                    <select id="model-selector"></select>
-                    <button id="stop-generating-btn" class="hidden">
-                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512" width="1em" height="1em"><path fill="currentColor" d="M342.6 150.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0L192 210.7 86.6 105.4c-12.5-12.5-32.8-12.5-45.3 0s-12.5 32.8 0 45.3L146.7 256 41.4 361.4c-12.5 12.5-12.5 32.8 0 45.3s32.8 12.5 45.3 0L192 301.3 297.4 406.6c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L237.3 256 342.6 150.6z"/></svg>
-                        Stop Generating
-                    </button>
-                    <p>Powered by local Ollama models.</p>
-                </div>
+                    <div class="input-footer">
+                        <select id="model-selector" aria-label="Select a Language Model"></select>
+                        <button type="button" id="stop-generating-btn" class="hidden">
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 384 512" width="1em" height="1em"><path fill="currentColor" d="M342.6 150.6c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0L192 210.7 86.6 105.4c-12.5-12.5-32.8-12.5-45.3 0s-12.5 32.8 0 45.3L146.7 256 41.4 361.4c-12.5 12.5-12.5 32.8 0 45.3s32.8 12.5 45.3 0L192 301.3 297.4 406.6c12.5 12.5 32.8 12.5 45.3 0s12.5-32.8 0-45.3L237.3 256 342.6 150.6z"/></svg>
+                            Stop Generating
+                        </button>
+                        <p>Powered by local Ollama models.</p>
+                    </div>
+                </form>
             </footer>
-            <form id="chat-form" hidden></form>
         </main>
     </div>
 
-    <!-- NEW: Add marked.js and highlight.js -->
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
     <script src="{{ url_for('static', filename='script.js') }}"></script>

@@ -1,16 +1,18 @@
 /* --- Root Variables & Base Styles --- */
+/* In style.css */
+
 :root {
-    --bg-main: #1e1f22;
-    --bg-sidebar: #18191c;
-    --bg-input: #353739;
-    --text-primary: #e3e3e3;
-    --text-secondary: #8e8e8e;
-    --border-color: #3a3a3a;
-    --accent-color: #5865f2;
-    --accent-hover: #4752c4;
-    --user-msg-bg: #2a2b2f;
-    --ai-msg-bg: #303135;
-    --error-color: #ed4245;
+    --bg-main: #111111; /* Deeper black for main background */
+    --bg-sidebar: #191919; /* Slightly lighter for sidebar */
+    --bg-input: #2d2d2d; /* Higher contrast for input fields */
+    --text-primary: #f0f0f0; /* Slightly off-white for softer text */
+    --text-secondary: #a0a0a0; /* Lighter secondary text */
+    --border-color: #333333; /* Softer border color */
+    --accent-color: #8A2BE2; /* A vibrant BlueViolet */
+    --accent-hover: #7B1AD6; /* A slightly darker shade for hover */
+    --user-msg-bg: #222222; /* Darker user message background */
+    --ai-msg-bg: #282828; /* Darker AI message background */
+    --error-color: #ff4d4d;
     --success-color: #57f287;
     --font-family: "Inter", -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
     --border-radius: 12px;
@@ -615,3 +617,9 @@ pre:hover .copy-code-btn { opacity: 1; }
 /* --- Animations --- */
 @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+
+.message-container.is-fading-out {
+    opacity: 0;
+    transform: scale(0.95);
+    transition: all 0.3s ease-in-out;
+}

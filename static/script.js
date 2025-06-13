@@ -285,13 +285,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         currentAbortController = new AbortController();
         stopGeneratingBtn.classList.remove('hidden');
-
-        const userMsgContainer = document.querySelector(`.message-container[data-msg-index="${editState.msgIndex}"]`);
-        const userMsgContent = userMsgContainer.querySelector('.message-content');
-        userMsgContent.innerHTML = `<p>${newPrompt.replace(/\n/g, '<br>')}</p>`;
         
-        const oldAiMsg = document.querySelector(`.message-container[data-msg-index="${editState.msgIndex + 1}"]`);
-        if (oldAiMsg) oldAiMsg.remove();
         const aiLoadingMessage = renderMessage({ role: 'assistant', content: '', model: model }, editState.msgIndex + 1, true);
 
         promptInput.value = '';
@@ -305,11 +299,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 signal: currentAbortController.signal
             });
             const data = await response.json();
-            aiLoadingMessage.remove();
-
+            
+            // This endpoint returns the whole history. We reload the chat.
             if (!response.ok) throw new Error(data.error || "Failed to edit and regenerate.");
             
-            renderMessage(data.response, editState.msgIndex + 1);
+            // Reload the entire chat history to reflect the changes.
+            await loadChatHistory(editState.chatId);
 
         } catch (error) {
              aiLoadingMessage.remove();
@@ -352,12 +347,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const response = await fetch(`/api/chat/${chatId}/message/${msgIndex}`, { method: 'DELETE' });
             if (!response.ok) throw new Error((await response.json()).error || 'Failed to delete message.');
             
-            const userMsg = document.querySelector(`.message-container[data-msg-index="${msgIndex}"]`);
-            const aiMsg = document.querySelector(`.message-container[data-msg-index="${msgIndex+1}"]`);
-            if (userMsg) userMsg.remove();
-            if (aiMsg) aiMsg.remove();
-            
-            document.querySelectorAll('.message-container').forEach((el, i) => el.dataset.msgIndex = i);
+            await loadChatHistory(chatId); // Easiest way to ensure consistency
 
         } catch (error) {
             console.error(error);
@@ -365,20 +355,32 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     };
 
+    // in script.js
+
     const handleRegenerateMessage = async (chatId, msgIndex, modelToUse = null) => {
         const messageContainer = document.querySelector(`.message-container[data-msg-index="${msgIndex}"]`);
         if (!messageContainer) return;
 
+        const messageBubble = messageContainer.querySelector('.message-bubble');
+        if (!messageBubble) return;
+        
         const originalModel = messageContainer.querySelector('.model-tag')?.textContent;
         const model = modelToUse || originalModel || modelSelector.value;
         
-        const contentDiv = messageContainer.querySelector('.message-content');
-        const actionsDiv = messageContainer.querySelector('.message-actions');
+        // --- Step 1: Find the internal parts and show the loading state ---
+        const messageHeader = messageBubble.querySelector('.message-header');
+        const messageContent = messageBubble.querySelector('.message-content');
+        const messageActions = messageBubble.querySelector('.message-actions');
         
-        contentDiv.innerHTML = '<p><span class="loading-pulse">Regenerating...</span></p>';
-        if (actionsDiv) actionsDiv.style.display = 'none';
+        if (messageContent) {
+             messageContent.innerHTML = '<p><span class="loading-pulse">Regenerating...</span></p>';
+        }
+        if (messageActions) {
+            messageActions.style.visibility = 'hidden'; // Hide actions during regeneration
+        }
 
         try {
+            // --- Step 2: Fetch the new response ---
             const response = await fetch(`/api/chat/${chatId}/regenerate`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -390,12 +392,55 @@ document.addEventListener('DOMContentLoaded', () => {
                 throw new Error(data.error || "Failed to regenerate response from server.");
             }
 
-            renderMessage(data.response, msgIndex);
+            // --- Step 3: Surgically update the content of the existing bubble ---
+            const newResponse = data.response;
+
+            // Update the model tag in the header
+            if (messageHeader) {
+                let modelTag = messageHeader.querySelector('.model-tag');
+                if (!modelTag) {
+                    modelTag = document.createElement('span');
+                    modelTag.className = 'model-tag';
+                    messageHeader.appendChild(modelTag);
+                }
+                modelTag.textContent = newResponse.model;
+            }
+
+            // Update the message content itself with the new HTML
+            if (messageContent) {
+                // To create a subtle fade effect, we do it in two steps
+                messageContent.style.opacity = '0';
+                setTimeout(() => {
+                    messageContent.innerHTML = marked.parse(newResponse.content);
+                    // Re-apply syntax highlighting and copy buttons
+                    messageContent.querySelectorAll('pre').forEach(pre => {
+                        const copyButton = document.createElement('button');
+                        copyButton.className = 'copy-code-btn';
+                        copyButton.textContent = 'Copy';
+                        copyButton.onclick = () => {
+                            const code = pre.querySelector('code').innerText;
+                            navigator.clipboard.writeText(code).then(() => {
+                                copyButton.textContent = 'Copied!';
+                                setTimeout(() => { copyButton.textContent = 'Copy'; }, 2000);
+                            });
+                        };
+                        pre.appendChild(copyButton);
+                    });
+                    messageContent.style.opacity = '1';
+                    messageContent.style.transition = 'opacity 0.3s ease-in-out';
+                }, 100); // A small delay to allow the opacity to register
+            }
 
         } catch (error) {
             console.error("Regeneration failed:", error);
-            contentDiv.innerHTML = `<p><strong>Error regenerating:</strong> ${error.message}</p>`;
-            if (actionsDiv) actionsDiv.style.display = 'flex';
+            if (messageContent) {
+                messageContent.innerHTML = `<p><strong>Error regenerating:</strong> ${error.message}</p>`;
+            }
+        } finally {
+            // --- Step 4: Make the actions visible again ---
+            if (messageActions) {
+                messageActions.style.visibility = 'visible';
+            }
         }
     };
     
