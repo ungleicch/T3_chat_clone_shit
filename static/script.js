@@ -357,90 +357,68 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // in script.js
 
+    // in script.js
+
     const handleRegenerateMessage = async (chatId, msgIndex, modelToUse = null) => {
         const messageContainer = document.querySelector(`.message-container[data-msg-index="${msgIndex}"]`);
         if (!messageContainer) return;
-
-        const messageBubble = messageContainer.querySelector('.message-bubble');
-        if (!messageBubble) return;
         
+        // Abort any other ongoing requests
+        if (currentAbortController) {
+            currentAbortController.abort();
+        }
+        currentAbortController = new AbortController();
+        stopGeneratingBtn.classList.remove('hidden');
+
         const originalModel = messageContainer.querySelector('.model-tag')?.textContent;
         const model = modelToUse || originalModel || modelSelector.value;
         
-        // --- Step 1: Find the internal parts and show the loading state ---
-        const messageHeader = messageBubble.querySelector('.message-header');
-        const messageContent = messageBubble.querySelector('.message-content');
-        const messageActions = messageBubble.querySelector('.message-actions');
+        // --- Step 1: Replace the old message with a new "loading" placeholder ---
+        // This clears the old content and prepares for the new stream.
+        const loadingMessageContainer = renderMessage({ role: 'assistant', content: '', model: model }, msgIndex, true);
+        const contentDiv = loadingMessageContainer.querySelector('.message-content');
         
-        if (messageContent) {
-             messageContent.innerHTML = '<p><span class="loading-pulse">Regenerating...</span></p>';
-        }
-        if (messageActions) {
-            messageActions.style.visibility = 'hidden'; // Hide actions during regeneration
-        }
-
         try {
-            // --- Step 2: Fetch the new response ---
+            // --- Step 2: Fetch the new STREAMING response ---
             const response = await fetch(`/api/chat/${chatId}/regenerate`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ model: model, msg_index: msgIndex })
+                body: JSON.stringify({ model: model, msg_index: msgIndex }),
+                signal: currentAbortController.signal,
             });
 
-            const data = await response.json();
-            if (!response.ok) {
-                throw new Error(data.error || "Failed to regenerate response from server.");
-            }
+            if (!response.ok) throw new Error(await response.text());
 
-            // --- Step 3: Surgically update the content of the existing bubble ---
-            const newResponse = data.response;
-
-            // Update the model tag in the header
-            if (messageHeader) {
-                let modelTag = messageHeader.querySelector('.model-tag');
-                if (!modelTag) {
-                    modelTag = document.createElement('span');
-                    modelTag.className = 'model-tag';
-                    messageHeader.appendChild(modelTag);
-                }
-                modelTag.textContent = newResponse.model;
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let fullContent = "";
+            
+            // --- Step 3: Stream the content into the placeholder ---
+            while(true) {
+                const { value, done } = await reader.read();
+                if (done) break;
+                
+                fullContent += decoder.decode(value, { stream: true });
+                contentDiv.innerHTML = marked.parse(fullContent + '<span class="loading-pulse"></span>');
+                chatWindow.scrollTop = chatWindow.scrollHeight;
             }
-
-            // Update the message content itself with the new HTML
-            if (messageContent) {
-                // To create a subtle fade effect, we do it in two steps
-                messageContent.style.opacity = '0';
-                setTimeout(() => {
-                    messageContent.innerHTML = marked.parse(newResponse.content);
-                    // Re-apply syntax highlighting and copy buttons
-                    messageContent.querySelectorAll('pre').forEach(pre => {
-                        const copyButton = document.createElement('button');
-                        copyButton.className = 'copy-code-btn';
-                        copyButton.textContent = 'Copy';
-                        copyButton.onclick = () => {
-                            const code = pre.querySelector('code').innerText;
-                            navigator.clipboard.writeText(code).then(() => {
-                                copyButton.textContent = 'Copied!';
-                                setTimeout(() => { copyButton.textContent = 'Copy'; }, 2000);
-                            });
-                        };
-                        pre.appendChild(copyButton);
-                    });
-                    messageContent.style.opacity = '1';
-                    messageContent.style.transition = 'opacity 0.3s ease-in-out';
-                }, 100); // A small delay to allow the opacity to register
-            }
+            
+            // --- Step 4: Render the final, complete message ---
+            loadingMessageContainer.remove(); // Remove the placeholder
+            const finalMessage = { role: 'assistant', content: fullContent, model: model };
+            renderMessage(finalMessage, msgIndex); // Render the final version
 
         } catch (error) {
-            console.error("Regeneration failed:", error);
-            if (messageContent) {
-                messageContent.innerHTML = `<p><strong>Error regenerating:</strong> ${error.message}</p>`;
+            loadingMessageContainer.remove(); // Remove placeholder on error too
+            if (error.name === 'AbortError') {
+                 renderMessage({role: 'assistant', content: '*Request cancelled by user.*'}, msgIndex);
+            } else {
+                console.error("Regeneration failed:", error);
+                renderMessage({role: 'assistant', content: `**Error regenerating:** ${error.message}`}, msgIndex);
             }
         } finally {
-            // --- Step 4: Make the actions visible again ---
-            if (messageActions) {
-                messageActions.style.visibility = 'visible';
-            }
+            stopGeneratingBtn.classList.add('hidden');
+            currentAbortController = null;
         }
     };
     

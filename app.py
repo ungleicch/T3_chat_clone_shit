@@ -309,6 +309,8 @@ def delete_message(chat_id, msg_index):
     save_chat_history(chat_id, chat_data)
     return jsonify({"success": True})
 
+# in app.py
+
 @app.route('/api/chat/<chat_id>/regenerate', methods=['POST'])
 def regenerate_response(chat_id):
     data = request.json
@@ -323,6 +325,7 @@ def regenerate_response(chat_id):
     if not (0 < msg_index < len(chat_data['messages']) and chat_data['messages'][msg_index]['role'] == 'assistant'):
         return jsonify({"error": "Invalid index for regeneration."}), 400
     
+    # THE FIX: Context is all messages *before* the one being regenerated
     messages_for_api = chat_data['messages'][:msg_index]
     
     last_user_msg = messages_for_api[-1]
@@ -345,22 +348,37 @@ def regenerate_response(chat_id):
             api_user_message['images'] = images_b64
             messages_for_api[-1] = api_user_message
     
+    # THE FIX: This endpoint now streams the response
     try:
-        response = ollama.chat(model=final_model, messages=messages_for_api)
-        raw_ai_message = response['message']
-        ai_message_dict = {
-            'role': raw_ai_message['role'],
-            'content': raw_ai_message['content'],
-            'model': final_model
-        }
-        
-        chat_data['messages'][msg_index] = ai_message_dict
-        save_chat_history(chat_id, chat_data)
-        
-        return jsonify({"response": ai_message_dict})
+        stream = ollama.chat(model=final_model, messages=messages_for_api, stream=True)
+        def generate():
+            full_response_content = ""
+            try:
+                for chunk in stream:
+                    if 'content' in chunk['message']:
+                        content_piece = chunk['message']['content']
+                        full_response_content += content_piece
+                        yield content_piece
+                
+                # After streaming, update the history with the final message
+                ai_message_dict = {
+                    'role': 'assistant',
+                    'content': full_response_content,
+                    'model': final_model
+                }
+                
+                # Reload chat data to prevent race conditions before saving
+                current_chat_data = load_chat_history(chat_id)
+                current_chat_data['messages'][msg_index] = ai_message_dict # Replace the old message
+                save_chat_history(chat_id, current_chat_data)
+
+            except Exception as e:
+                print(f"Error during regeneration stream for chat {chat_id}: {e}")
+
+        return Response(generate(), mimetype='text/plain')
     except Exception as e:
         traceback.print_exc()
-        return jsonify({"error": f"Error during regeneration: {e}"}), 500
+        return Response(f"Ollama API Error: {e}", status=500)
 
 @app.route('/api/chat/<chat_id>/edit_and_regenerate', methods=['POST'])
 def edit_and_regenerate(chat_id):
