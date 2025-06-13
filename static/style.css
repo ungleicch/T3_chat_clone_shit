@@ -559,7 +559,7 @@ pre:hover .copy-code-btn { opacity: 1; }
     padding: 0.5rem; 
     resize: none; 
     
-    /* --- THE FIX IS HERE --- */
+    /* --- THE FIX IS HERE: Better typing experience --- */
     overflow-y: auto; /* Show scrollbar if content exceeds max-height */
     max-height: 200px; /* Set a reasonable max height */
     transition: height 0.2s ease; /* Smoothly animate height changes */

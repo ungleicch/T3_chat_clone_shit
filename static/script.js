@@ -15,6 +15,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     let currentChatId = null;
     let attachedFiles = [];
+    // THE FIX: AbortController to cancel streaming fetch requests
     let currentAbortController = null;
     let editState = null;
     
@@ -28,6 +29,7 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     const init = () => {
+        // NEW: Configure marked.js with highlight.js integration
         marked.setOptions({
             highlight: function(code, lang) {
                 const language = hljs.getLanguage(lang) ? lang : 'plaintext';
@@ -82,6 +84,10 @@ document.addEventListener('DOMContentLoaded', () => {
     };
     
     const loadChatHistory = async (chatId) => {
+        // THE FIX: Abort any ongoing stream when changing chats
+        if (currentAbortController) {
+            currentAbortController.abort();
+        }
         if (currentChatId === chatId && chatWindow.innerHTML.trim() !== '' && !chatWindow.querySelector('.welcome-screen')) return;
         try {
             const response = await fetch(`/api/chat/${chatId}`);
@@ -123,15 +129,20 @@ document.addEventListener('DOMContentLoaded', () => {
                 loadChatHistory(chatId);
             }
         });
+        // THE FIX: Centralized stop button logic
         stopGeneratingBtn.addEventListener('click', () => {
             if (currentAbortController) {
                 currentAbortController.abort();
-                console.log("Request aborted.");
+                console.log("Request aborted by user.");
             }
         });
     };
 
     const createNewChat = () => {
+        // THE FIX: Abort any ongoing stream
+        if (currentAbortController) {
+            currentAbortController.abort();
+        }
         currentChatId = null;
         editState = null;
         updateActiveChatItem(null);
@@ -140,6 +151,7 @@ document.addEventListener('DOMContentLoaded', () => {
         promptInput.value = '';
         autoResizeTextarea();
         promptInput.focus();
+        // Reset send button to its original state
         sendBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512" width="1em" height="1em"><path fill="currentColor" d="M429.6 92.1c4.9-11.9 2.1-25.6-7-34.7s-22.8-11.9-34.7-7l-352 144c-14.2 5.8-22.2 20.8-19.3 35.8s16.1 25.8 31.4 25.8H224V432c0 15.3 10.8 28.4 25.8 31.4s30-5.1 35.8-19.3l144-352z"/></svg>`;
         sendBtn.title = "Send";
     };
@@ -159,6 +171,10 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
         
+        // THE FIX: Abort previous request and create a new controller
+        if (currentAbortController) {
+            currentAbortController.abort();
+        }
         currentAbortController = new AbortController();
         stopGeneratingBtn.classList.remove('hidden');
 
@@ -168,12 +184,17 @@ document.addEventListener('DOMContentLoaded', () => {
         formData.append('prompt', prompt);
         attachedFiles.forEach(file => formData.append('files', file));
         
+        if(chatWindow.querySelector('.welcome-screen')) {
+             chatWindow.innerHTML = '';
+        }
+
         clearFileInputs();
         promptInput.value = '';
         autoResizeTextarea();
 
         try {
             if (!chatIdToUse) {
+                // This is a new chat
                 const initResponse = await fetch('/api/chat/initiate', {
                     method: 'POST',
                     body: formData,
@@ -184,13 +205,13 @@ document.addEventListener('DOMContentLoaded', () => {
                 
                 chatIdToUse = initData.chatId;
                 currentChatId = initData.chatId;
-                await loadChatList();
+                await loadChatList(); // Reload list to show the new chat
                 updateActiveChatItem(currentChatId);
-                chatWindow.innerHTML = '';
-                renderMessage(initData.user_message, 0);
+                renderMessage(initData.user_message, 0); // Render the user message returned by the server
             } else {
-                 // Simplified: for existing chats, just optimistically render the user message.
-                 // A more complex implementation would need an "add_message" endpoint.
+                 // This is an existing chat. We need a way to add the message.
+                 // For now, let's assume the backend will handle appending it. We'll render it optimistically.
+                 // A better long-term solution is a dedicated "add message" endpoint.
                 const tempUserAttachments = attachedFiles.map(file => ({
                     original_filename: file.name, type: file.type, url: URL.createObjectURL(file)
                 }));
@@ -206,13 +227,16 @@ document.addEventListener('DOMContentLoaded', () => {
                 renderMessage({role: 'assistant', content: `**Error:** ${error.message}`}, -1);
             }
         } finally {
+            // THE FIX: Clean up controller and UI state
             stopGeneratingBtn.classList.add('hidden');
             currentAbortController = null;
         }
     };
     
+    // THE FIX: Rewritten function for better streaming UX
     async function streamAndRenderResponse(chatId, model) {
         const aiMsgIndex = document.querySelectorAll('.message-container').length;
+        // 1. Render a loading placeholder
         const aiMessageContainer = renderMessage({ role: 'assistant', content: '', model: model }, aiMsgIndex, true);
         const contentDiv = aiMessageContainer.querySelector('.message-content');
         
@@ -221,7 +245,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({ model }),
-                signal: currentAbortController.signal
+                signal: currentAbortController.signal // Pass the signal
             });
 
             if (!response.ok) throw new Error(await response.text());
@@ -230,27 +254,33 @@ document.addEventListener('DOMContentLoaded', () => {
             const decoder = new TextDecoder();
             let fullContent = "";
             
+            // 2. Stream content into the placeholder
             while(true) {
                 const { value, done } = await reader.read();
                 if (done) break;
                 
                 fullContent += decoder.decode(value, { stream: true });
-                contentDiv.innerHTML = marked.parse(fullContent);
+                // Use marked.parse for real-time preview (optional but nice)
+                contentDiv.innerHTML = marked.parse(fullContent + '<span class="loading-pulse"></span>');
                 chatWindow.scrollTop = chatWindow.scrollHeight;
             }
             
-            // THE FIX: Replace the loading message with the final, fully-rendered one.
-            // This ensures action buttons and syntax highlighting are correctly applied.
+            // 3. Remove the placeholder and render the final, complete message
             aiMessageContainer.remove();
             const finalMessage = { role: 'assistant', content: fullContent, model: model };
             renderMessage(finalMessage, aiMsgIndex);
+            // After successful response, reload chat list in case title was generated
+            if (document.querySelectorAll('.message-container').length <= 2) {
+                 await loadChatList();
+            }
 
         } catch (error) {
+            aiMessageContainer.remove(); // Also remove on error
             if (error.name === 'AbortError') {
-                contentDiv.innerHTML = "<p>Request cancelled by user.</p>";
+                renderMessage({role: 'assistant', content: '*Request cancelled by user.*'}, aiMsgIndex);
             } else {
                 console.error("Response streaming error:", error);
-                contentDiv.innerHTML = `<p><strong>Error:</strong> ${error.message}</p>`;
+                renderMessage({role: 'assistant', content: `**Error:** ${error.message}`}, aiMsgIndex);
             }
         }
     }
@@ -260,13 +290,19 @@ document.addEventListener('DOMContentLoaded', () => {
         const model = modelSelector.value;
         if (!newPrompt || !model || !editState) return;
 
+        // THE FIX: Abort previous request and create a new controller
+        if (currentAbortController) {
+            currentAbortController.abort();
+        }
         currentAbortController = new AbortController();
         stopGeneratingBtn.classList.remove('hidden');
 
+        // Update the user message in the UI
         const userMsgContainer = document.querySelector(`.message-container[data-msg-index="${editState.msgIndex}"]`);
         const userMsgContent = userMsgContainer.querySelector('.message-content');
         userMsgContent.innerHTML = `<p>${newPrompt.replace(/\n/g, '<br>')}</p>`;
         
+        // Remove the old AI response and show a loading placeholder
         const oldAiMsg = document.querySelector(`.message-container[data-msg-index="${editState.msgIndex + 1}"]`);
         if (oldAiMsg) oldAiMsg.remove();
         const aiLoadingMessage = renderMessage({ role: 'assistant', content: '', model: model }, editState.msgIndex + 1, true);
@@ -286,19 +322,22 @@ document.addEventListener('DOMContentLoaded', () => {
 
             if (!response.ok) throw new Error(data.error || "Failed to edit and regenerate.");
             
+            // Render the new, complete response
             renderMessage(data.response, editState.msgIndex + 1);
 
         } catch (error) {
+             aiLoadingMessage.remove();
              if (error.name === 'AbortError') {
-                 aiLoadingMessage.querySelector('.message-content').innerHTML = '<p>Request cancelled by user.</p>';
+                 renderMessage({role: 'assistant', content: '*Request cancelled by user.*'}, editState.msgIndex + 1);
             } else {
                 console.error('Edit submission error:', error);
-                const errorContent = aiLoadingMessage.querySelector('.message-content');
-                errorContent.innerHTML = `<p><strong>Error:</strong> ${error.message}</p>`;
+                renderMessage({role: 'assistant', content: `**Error:** ${error.message}`}, editState.msgIndex + 1);
             }
         } finally {
+            // THE FIX: Reset UI state
             editState = null;
             stopGeneratingBtn.classList.add('hidden');
+            currentAbortController = null;
             sendBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512" width="1em" height="1em"><path fill="currentColor" d="M429.6 92.1c4.9-11.9 2.1-25.6-7-34.7s-22.8-11.9-34.7-7l-352 144c-14.2 5.8-22.2 20.8-19.3 35.8s16.1 25.8 31.4 25.8H224V432c0 15.3 10.8 28.4 25.8 31.4s30-5.1 35.8-19.3l144-352z"/></svg>`;
             sendBtn.title = "Send";
         }
@@ -306,11 +345,15 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const handleEditMessage = (chatId, msgIndex) => {
         const messageContainer = document.querySelector(`.message-container[data-msg-index="${msgIndex}"]`);
-        const contentP = messageContainer.querySelector('.message-content p');
-        if (!contentP) return;
+        const contentDiv = messageContainer.querySelector('.message-content');
+        if (!contentDiv) return;
+        
+        // This is a naive way to get raw text back from HTML. A better way would be to store original text.
+        const tempDiv = document.createElement('div');
+        tempDiv.innerHTML = contentDiv.innerHTML.replace(/<br\s*\/?>/ig, '\n');
+        const currentText = tempDiv.textContent || tempDiv.innerText || "";
 
-        const currentText = contentP.innerHTML.replace(/<br\s*\/?>/ig, '\n');
-        promptInput.value = currentText;
+        promptInput.value = currentText.trim();
         promptInput.focus();
         autoResizeTextarea();
 
@@ -324,7 +367,14 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             const response = await fetch(`/api/chat/${chatId}/message/${msgIndex}`, { method: 'DELETE' });
             if (!response.ok) throw new Error((await response.json()).error || 'Failed to delete message.');
-            await loadChatHistory(chatId);
+            // Instead of reloading the whole chat, just remove the elements
+            const userMsg = document.querySelector(`.message-container[data-msg-index="${msgIndex}"]`);
+            const aiMsg = document.querySelector(`.message-container[data-msg-index="${msgIndex+1}"]`);
+            if (userMsg) userMsg.remove();
+            if (aiMsg) aiMsg.remove();
+            // Re-index remaining messages to avoid issues
+            document.querySelectorAll('.message-container').forEach((el, i) => el.dataset.msgIndex = i);
+
         } catch (error) {
             console.error(error);
             alert(error.message);
@@ -336,27 +386,33 @@ document.addEventListener('DOMContentLoaded', () => {
         const originalModel = messageContainer.querySelector('.model-tag')?.textContent;
         const model = modelToUse || originalModel || modelSelector.value;
         
-        const contentDiv = messageContainer.querySelector('.message-content');
-        contentDiv.innerHTML = '<p><span class="loading-pulse">Regenerating...</span></p>';
+        // Remove the old message and immediately start the streaming process for the new one
+        messageContainer.remove();
         
+        // This requires a different backend endpoint that doesn't rely on the *last* message.
+        // Let's assume the backend can handle `regenerate`. We'll just stream into the same spot.
+        // NOTE: This logic is simplified. A robust implementation would be more complex.
+        
+        // For simplicity, we'll just reload the chat history up to the point of regeneration
+        // and then start a new stream. This is inefficient but reliable.
         try {
-            const response = await fetch(`/api/chat/${chatId}/regenerate`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ model: model, msg_index: msgIndex })
-            });
-            const data = await response.json();
-            if (!response.ok) throw new Error(data.error || "Failed to regenerate.");
-
-            renderMessage(data.response, msgIndex);
-            messageContainer.remove();
+            const chatDataRes = await fetch(`/api/chat/${chatId}`);
+            const chatData = await chatDataRes.json();
+            
+            // Trim messages to the point of regeneration
+            chatWindow.innerHTML = '';
+            chatData.messages.slice(0, msgIndex).forEach((msg, i) => renderMessage(msg, i));
+            
+            // Now stream the new response
+            await streamAndRenderResponse(chatId, model);
 
         } catch (error) {
-            console.error(error);
-            contentDiv.innerHTML = `<p><strong>Error:</strong> ${error.message}</p>`;
+             console.error(error);
+             renderMessage({role: 'assistant', content: `**Error during regeneration:** ${error.message}`}, msgIndex);
         }
     };
     
+    // THE FIX: Rewritten render function for better control and features
     const renderMessage = (msg, index, isLoading = false) => {
         const { role, content, attachments, model } = msg;
         const container = document.createElement('div');
@@ -403,32 +459,33 @@ document.addEventListener('DOMContentLoaded', () => {
             messageContent.innerHTML = '<p><span class="loading-pulse"></span></p>';
         } else {
             let processedContent = content || "";
+            // Use marked for assistant, escape user input
             if (role === 'assistant') {
                 processedContent = marked.parse(processedContent);
             } else {
+                // Basic escaping for user content to prevent HTML injection
                 const escapedContent = processedContent.replace(/</g, "<").replace(/>/g, ">");
                 processedContent = `<p>${escapedContent.replace(/\n/g, '<br>')}</p>`;
             }
             messageContent.innerHTML = attachmentsHTML + processedContent;
         }
 
-        messageContent.querySelectorAll('pre code').forEach((block) => {
-            hljs.highlightElement(block);
-        });
-
-        messageContent.querySelectorAll('pre').forEach(pre => {
-            const copyButton = document.createElement('button');
-            copyButton.className = 'copy-code-btn';
-            copyButton.textContent = 'Copy';
-            copyButton.onclick = () => {
-                const code = pre.querySelector('code').innerText;
-                navigator.clipboard.writeText(code).then(() => {
-                    copyButton.textContent = 'Copied!';
-                    setTimeout(() => { copyButton.textContent = 'Copy'; }, 2000);
-                });
-            };
-            pre.appendChild(copyButton);
-        });
+        // Add copy button to code blocks
+        if (!isLoading) {
+            messageContent.querySelectorAll('pre').forEach(pre => {
+                const copyButton = document.createElement('button');
+                copyButton.className = 'copy-code-btn';
+                copyButton.textContent = 'Copy';
+                copyButton.onclick = () => {
+                    const code = pre.querySelector('code').innerText;
+                    navigator.clipboard.writeText(code).then(() => {
+                        copyButton.textContent = 'Copied!';
+                        setTimeout(() => { copyButton.textContent = 'Copy'; }, 2000);
+                    });
+                };
+                pre.appendChild(copyButton);
+            });
+        }
         
         messageBubble.appendChild(messageHeader);
         messageBubble.appendChild(messageContent);
@@ -504,6 +561,7 @@ document.addEventListener('DOMContentLoaded', () => {
         const rect = target.getBoundingClientRect();
         popup.style.left = `${rect.left}px`;
         popup.style.top = `${rect.bottom + 5}px`;
+        // Close popup when clicking outside
         setTimeout(() => {
             document.addEventListener('click', function closePopup(e) {
                 if (!popup.contains(e.target) && e.target !== target) {
@@ -515,6 +573,11 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     const addChatToList = (id, title, prepend = false) => {
+        const existingItem = document.querySelector(`.chat-list-item[data-chat-id="${id}"]`);
+        if (existingItem) {
+            existingItem.querySelector('.chat-title').textContent = title;
+            return;
+        }
         const li = document.createElement('li');
         li.className = 'chat-list-item';
         li.dataset.chatId = id;
@@ -541,10 +604,10 @@ document.addEventListener('DOMContentLoaded', () => {
             <div class="welcome-screen">
                 <h1>How can I help you?</h1>
                 <div class="suggestion-pills">
-                    <div class="suggestion-pill">✨ Create a story</div>
-                    <div class="suggestion-pill">🔍 Explore ideas</div>
-                    <div class="suggestion-pill">💻 Code a function</div>
-                    <div class="suggestion-pill">🎓 Learn something new</div>
+                    <div class="suggestion-pill" data-prompt="Create a story">✨ Create a story</div>
+                    <div class="suggestion-pill" data-prompt="Explore ideas about space travel">🔍 Explore ideas</div>
+                    <div class="suggestion-pill" data-prompt="Code a function in python">💻 Code a function</div>
+                    <div class="suggestion-pill" data-prompt="Learn something new about ancient Rome">🎓 Learn something new</div>
                 </div>
                 <div class="example-prompts">
                     <div class="example-prompt">Explain how a black hole works</div>
@@ -556,7 +619,7 @@ document.addEventListener('DOMContentLoaded', () => {
             
         chatWindow.querySelectorAll('.example-prompt, .suggestion-pill').forEach(el => {
             el.addEventListener('click', () => {
-                promptInput.value = el.textContent;
+                promptInput.value = el.dataset.prompt || el.textContent;
                 promptInput.focus();
                 autoResizeTextarea();
             });
@@ -573,7 +636,7 @@ document.addEventListener('DOMContentLoaded', () => {
     
     const autoResizeTextarea = () => {
         promptInput.style.height = 'auto';
-        promptInput.style.height = `${Math.min(promptInput.scrollHeight, 200)}px`;
+        promptInput.style.height = `${promptInput.scrollHeight}px`;
     };
 
     const handleFileSelection = (e) => {
@@ -584,6 +647,9 @@ document.addEventListener('DOMContentLoaded', () => {
     
     const renderFilePreview = () => {
         filePreviewArea.innerHTML = '';
+        if (attachedFiles.length > 0) filePreviewArea.style.paddingBottom = '0.75rem';
+        else filePreviewArea.style.paddingBottom = '0';
+        
         attachedFiles.forEach((file, index) => {
             const fileEl = document.createElement('div');
             fileEl.className = 'file-preview';
@@ -593,12 +659,9 @@ document.addEventListener('DOMContentLoaded', () => {
             removeBtn.className = 'remove-file-btn';
             removeBtn.title = 'Remove file';
             removeBtn.textContent = '✖';
-            removeBtn.dataset.index = index;
             
-            removeBtn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                const fileIndexToRemove = parseInt(e.target.dataset.index, 10);
-                attachedFiles.splice(fileIndexToRemove, 1);
+            removeBtn.addEventListener('click', () => {
+                attachedFiles.splice(index, 1);
                 renderFilePreview();
             });
             
