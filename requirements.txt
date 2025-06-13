@@ -1,0 +1,7 @@
+Flask
+ollama
+PyMuPDF
+Pillow
+pillow-heif
+python-docx
+python-dotenv
