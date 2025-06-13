@@ -75,9 +75,9 @@ def generate_chat_title(prompt_text):
             options={"num_predict": 20}
         )
         title = response['message']['content'].strip()
-        return re.sub(r'["\']', '', title) if title else "Untitled Chat"
+        return re.sub(r'^["\']|["\']$', '', title) if title else "Untitled Chat"
     except Exception as e:
-        print(f"Warning: Could not generate title with LLM ({e}).")
+        print(f"Warning: Could not generate title with LLM ({e}). Using prompt as fallback.")
         return prompt_text[:50].strip()
 
 def process_and_save_files(chat_id, files):
@@ -138,9 +138,11 @@ def index():
 
 @app.route('/attachments/<chat_id>/<filename>')
 def get_attachment(chat_id, filename):
-    if not re.match(r'^[a-zA-Z0-9-]+$', chat_id) or '..' in filename: abort(400)
+    if not re.match(r'^[a-zA-Z0-9-]+$', chat_id) or '..' in filename:
+        abort(400)
     directory = CHATS_DIR / chat_id / ATTACHMENTS_DIR_NAME
-    if not directory.is_dir(): abort(404)
+    if not directory.is_dir():
+        abort(404)
     return send_from_directory(directory, filename)
 
 @app.route('/api/models', methods=['GET'])
@@ -174,7 +176,8 @@ def get_all_chats():
 @app.route('/api/chat/<chat_id>', methods=['GET'])
 def get_chat_history_route(chat_id):
     chat_data = load_chat_history(chat_id)
-    if chat_data is None: abort(404, "Chat not found")
+    if chat_data is None:
+        abort(404, "Chat not found")
     return jsonify(chat_data)
 
 @app.route('/api/chat/initiate', methods=['POST'])
@@ -187,10 +190,11 @@ def initiate_chat():
         return jsonify({"error": "Cannot start a chat with an empty message."}), 400
 
     chat_id = str(uuid.uuid4())
-    title = generate_chat_title(prompt) if prompt else "Attachment Analysis"
     
     attachments_data, extracted_text = process_and_save_files(chat_id, files)
     full_prompt = f"{prompt}\n\n{extracted_text}".strip()
+
+    title = generate_chat_title(prompt) if prompt else "Attachment Analysis"
 
     user_message = {"role": "user", "content": full_prompt}
     if attachments_data:
@@ -202,16 +206,43 @@ def initiate_chat():
     return jsonify({
         "chatId": chat_id,
         "title": title,
-        "user_message": user_message # Send back the full user message
+        "user_message": user_message
     })
+
+@app.route('/api/chat/<chat_id>/add_message', methods=['POST'])
+def add_message_to_chat(chat_id):
+    chat_data = load_chat_history(chat_id)
+    if not chat_data:
+        return jsonify({"error": "Chat not found."}), 404
+
+    data = request.form
+    files = request.files.getlist('files')
+    prompt = data.get('prompt', '')
+
+    if not prompt and not files:
+        return jsonify({"error": "Cannot add an empty message."}), 400
+
+    attachments_data, extracted_text = process_and_save_files(chat_id, files)
+    full_prompt = f"{prompt}\n\n{extracted_text}".strip()
+
+    user_message = {"role": "user", "content": full_prompt}
+    if attachments_data:
+        user_message["attachments"] = attachments_data
+    
+    chat_data['messages'].append(user_message)
+    save_chat_history(chat_id, chat_data)
+
+    return jsonify({"user_message": user_message})
 
 @app.route('/api/chat/<chat_id>/respond', methods=['POST'])
 def get_chat_response(chat_id):
     model = request.json.get('model')
-    if not model: return Response("Model not provided", status=400)
+    if not model:
+        return Response("Model not provided", status=400)
     
     chat_data = load_chat_history(chat_id)
-    if not chat_data: return Response("Chat not found", status=404)
+    if not chat_data:
+        return Response("Chat not found", status=404)
 
     messages_for_api = list(chat_data['messages'])[-CONTEXT_WINDOW_MESSAGES:]
     last_user_msg = messages_for_api[-1]
@@ -238,26 +269,33 @@ def get_chat_response(chat_id):
         stream = ollama.chat(model=final_model, messages=messages_for_api, stream=True)
         def generate():
             full_response_content = ""
-            for chunk in stream:
-                if 'content' in chunk['message']:
-                    content_piece = chunk['message']['content']
-                    full_response_content += content_piece
-                    yield content_piece
-            
-            ai_message_dict = {'role': 'assistant', 'content': full_response_content, 'model': final_model}
-            chat_data['messages'].append(ai_message_dict)
-            save_chat_history(chat_id, chat_data)
-        
+            try:
+                for chunk in stream:
+                    if 'content' in chunk['message']:
+                        content_piece = chunk['message']['content']
+                        full_response_content += content_piece
+                        yield content_piece
+                
+                ai_message_dict = {'role': 'assistant', 'content': full_response_content, 'model': final_model}
+                current_chat_data = load_chat_history(chat_id)
+                current_chat_data['messages'].append(ai_message_dict)
+                save_chat_history(chat_id, current_chat_data)
+            except Exception as e:
+                print(f"Error during response generation stream for chat {chat_id}: {e}")
+
         return Response(generate(), mimetype='text/plain')
     except Exception as e:
         traceback.print_exc()
-        return Response(f"Ollama API Error: {e}", status=500)
+        error_message = f"Ollama API Error: {str(e)}"
+        return Response(error_message, status=500)
         
 @app.route('/api/chat/<chat_id>/message/<int:msg_index>', methods=['DELETE'])
 def delete_message(chat_id, msg_index):
     chat_data = load_chat_history(chat_id)
-    if not chat_data: return jsonify({"error": "Chat not found."}), 404
-    if not 0 <= msg_index < len(chat_data['messages']): return jsonify({"error": "Invalid message index."}), 400
+    if not chat_data:
+        return jsonify({"error": "Chat not found."}), 404
+    if not 0 <= msg_index < len(chat_data['messages']):
+        return jsonify({"error": "Invalid message index."}), 400
     
     message_to_delete = chat_data['messages'][msg_index]
     
@@ -265,11 +303,8 @@ def delete_message(chat_id, msg_index):
         if msg_index + 1 < len(chat_data['messages']) and chat_data['messages'][msg_index + 1]['role'] == 'assistant':
             chat_data['messages'].pop(msg_index + 1)
         chat_data['messages'].pop(msg_index)
-    
     elif message_to_delete['role'] == 'assistant':
         chat_data['messages'].pop(msg_index)
-        if msg_index > 0 and chat_data['messages'][msg_index - 1]['role'] == 'user':
-            chat_data['messages'].pop(msg_index - 1)
             
     save_chat_history(chat_id, chat_data)
     return jsonify({"success": True})
@@ -280,13 +315,16 @@ def regenerate_response(chat_id):
     model = data.get('model')
     msg_index = data.get('msg_index')
 
-    if not model: return jsonify({"error": "Model not provided."}), 400
+    if not model:
+        return jsonify({"error": "Model not provided."}), 400
     chat_data = load_chat_history(chat_id)
-    if not chat_data: return jsonify({"error": "Chat not found"}), 404
+    if not chat_data:
+        return jsonify({"error": "Chat not found"}), 404
     if not (0 < msg_index < len(chat_data['messages']) and chat_data['messages'][msg_index]['role'] == 'assistant'):
         return jsonify({"error": "Invalid index for regeneration."}), 400
     
     messages_for_api = chat_data['messages'][:msg_index]
+    
     last_user_msg = messages_for_api[-1]
     final_model = model
 
@@ -301,7 +339,8 @@ def regenerate_response(chat_id):
                     attachment_path = CHATS_DIR / chat_id / ATTACHMENTS_DIR_NAME / filename
                     with open(attachment_path, 'rb') as img_file:
                         images_b64.append(base64.b64encode(img_file.read()).decode('utf-8'))
-                except Exception as e: print(f"Error reading attachment {att['url']}: {e}")
+                except Exception as e:
+                    print(f"Error reading attachment {att['url']}: {e}")
         if images_b64: 
             api_user_message['images'] = images_b64
             messages_for_api[-1] = api_user_message
@@ -320,6 +359,7 @@ def regenerate_response(chat_id):
         
         return jsonify({"response": ai_message_dict})
     except Exception as e:
+        traceback.print_exc()
         return jsonify({"error": f"Error during regeneration: {e}"}), 500
 
 @app.route('/api/chat/<chat_id>/edit_and_regenerate', methods=['POST'])
@@ -333,16 +373,16 @@ def edit_and_regenerate(chat_id):
         return jsonify({"error": "Missing required data."}), 400
     
     chat_data = load_chat_history(chat_id)
-    if not chat_data: return jsonify({"error": "Chat not found"}), 404
+    if not chat_data:
+        return jsonify({"error": "Chat not found"}), 404
     if not (0 <= msg_index < len(chat_data['messages']) and chat_data['messages'][msg_index]['role'] == 'user'):
         return jsonify({"error": "Invalid index for edit."}), 400
 
     chat_data['messages'][msg_index]['content'] = new_prompt
     
-    if msg_index + 1 < len(chat_data['messages']) and chat_data['messages'][msg_index + 1]['role'] == 'assistant':
-        chat_data['messages'].pop(msg_index + 1)
+    chat_data['messages'] = chat_data['messages'][:msg_index + 1]
         
-    messages_for_api = chat_data['messages'][:msg_index + 1]
+    messages_for_api = chat_data['messages']
     
     last_user_msg = messages_for_api[-1]
     final_model = model
@@ -355,8 +395,10 @@ def edit_and_regenerate(chat_id):
                 try:
                     filename = Path(att['url']).name
                     attachment_path = CHATS_DIR / chat_id / ATTACHMENTS_DIR_NAME / filename
-                    with open(attachment_path, 'rb') as img_file: images_b64.append(base64.b64encode(img_file.read()).decode('utf-8'))
-                except Exception as e: print(f"Error reading attachment {att['url']}: {e}")
+                    with open(attachment_path, 'rb') as img_file:
+                        images_b64.append(base64.b64encode(img_file.read()).decode('utf-8'))
+                except Exception as e:
+                    print(f"Error reading attachment {att['url']}: {e}")
         if images_b64: 
             api_user_message['images'] = images_b64
             messages_for_api[-1] = api_user_message
@@ -371,6 +413,7 @@ def edit_and_regenerate(chat_id):
         
         return jsonify({"response": ai_message_dict})
     except Exception as e:
+        traceback.print_exc()
         return jsonify({"error": f"Error during edit and regeneration: {e}"}), 500
 
 @app.route('/api/chat/<chat_id>', methods=['DELETE'])

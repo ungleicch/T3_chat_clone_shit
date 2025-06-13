@@ -15,7 +15,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
     let currentChatId = null;
     let attachedFiles = [];
-    // THE FIX: AbortController to cancel streaming fetch requests
     let currentAbortController = null;
     let editState = null;
     
@@ -29,7 +28,6 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     const init = () => {
-        // NEW: Configure marked.js with highlight.js integration
         marked.setOptions({
             highlight: function(code, lang) {
                 const language = hljs.getLanguage(lang) ? lang : 'plaintext';
@@ -84,7 +82,6 @@ document.addEventListener('DOMContentLoaded', () => {
     };
     
     const loadChatHistory = async (chatId) => {
-        // THE FIX: Abort any ongoing stream when changing chats
         if (currentAbortController) {
             currentAbortController.abort();
         }
@@ -129,7 +126,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 loadChatHistory(chatId);
             }
         });
-        // THE FIX: Centralized stop button logic
         stopGeneratingBtn.addEventListener('click', () => {
             if (currentAbortController) {
                 currentAbortController.abort();
@@ -139,7 +135,6 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     const createNewChat = () => {
-        // THE FIX: Abort any ongoing stream
         if (currentAbortController) {
             currentAbortController.abort();
         }
@@ -151,7 +146,6 @@ document.addEventListener('DOMContentLoaded', () => {
         promptInput.value = '';
         autoResizeTextarea();
         promptInput.focus();
-        // Reset send button to its original state
         sendBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512" width="1em" height="1em"><path fill="currentColor" d="M429.6 92.1c4.9-11.9 2.1-25.6-7-34.7s-22.8-11.9-34.7-7l-352 144c-14.2 5.8-22.2 20.8-19.3 35.8s16.1 25.8 31.4 25.8H224V432c0 15.3 10.8 28.4 25.8 31.4s30-5.1 35.8-19.3l144-352z"/></svg>`;
         sendBtn.title = "Send";
     };
@@ -171,7 +165,6 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
         
-        // THE FIX: Abort previous request and create a new controller
         if (currentAbortController) {
             currentAbortController.abort();
         }
@@ -179,7 +172,6 @@ document.addEventListener('DOMContentLoaded', () => {
         stopGeneratingBtn.classList.remove('hidden');
 
         let chatIdToUse = currentChatId;
-
         const formData = new FormData();
         formData.append('prompt', prompt);
         attachedFiles.forEach(file => formData.append('files', file));
@@ -187,14 +179,14 @@ document.addEventListener('DOMContentLoaded', () => {
         if(chatWindow.querySelector('.welcome-screen')) {
              chatWindow.innerHTML = '';
         }
-
+        
         clearFileInputs();
         promptInput.value = '';
         autoResizeTextarea();
 
         try {
             if (!chatIdToUse) {
-                // This is a new chat
+                // This is a NEW chat, use the initiate endpoint
                 const initResponse = await fetch('/api/chat/initiate', {
                     method: 'POST',
                     body: formData,
@@ -205,20 +197,25 @@ document.addEventListener('DOMContentLoaded', () => {
                 
                 chatIdToUse = initData.chatId;
                 currentChatId = initData.chatId;
-                await loadChatList(); // Reload list to show the new chat
+                await loadChatList();
                 updateActiveChatItem(currentChatId);
-                renderMessage(initData.user_message, 0); // Render the user message returned by the server
+                renderMessage(initData.user_message, 0);
             } else {
-                 // This is an existing chat. We need a way to add the message.
-                 // For now, let's assume the backend will handle appending it. We'll render it optimistically.
-                 // A better long-term solution is a dedicated "add message" endpoint.
-                const tempUserAttachments = attachedFiles.map(file => ({
-                    original_filename: file.name, type: file.type, url: URL.createObjectURL(file)
-                }));
+                // This is an EXISTING chat.
+                // Step 1: Securely add the user's message to the backend history.
+                const addMsgResponse = await fetch(`/api/chat/${chatIdToUse}/add_message`, {
+                    method: 'POST',
+                    body: formData,
+                    signal: currentAbortController.signal,
+                });
+                const addMsgData = await addMsgResponse.json();
+                if (!addMsgResponse.ok) throw new Error(addMsgData.error || "Failed to add message to chat.");
+
                 const userMsgIndex = document.querySelectorAll('.message-container').length;
-                renderMessage({ role: 'user', content: prompt, attachments: tempUserAttachments }, userMsgIndex);
+                renderMessage(addMsgData.user_message, userMsgIndex);
             }
 
+            // Step 2: Now that the message is saved, ask the AI for a response.
             await streamAndRenderResponse(chatIdToUse, model);
 
         } catch (error) {
@@ -227,16 +224,13 @@ document.addEventListener('DOMContentLoaded', () => {
                 renderMessage({role: 'assistant', content: `**Error:** ${error.message}`}, -1);
             }
         } finally {
-            // THE FIX: Clean up controller and UI state
             stopGeneratingBtn.classList.add('hidden');
             currentAbortController = null;
         }
     };
     
-    // THE FIX: Rewritten function for better streaming UX
     async function streamAndRenderResponse(chatId, model) {
         const aiMsgIndex = document.querySelectorAll('.message-container').length;
-        // 1. Render a loading placeholder
         const aiMessageContainer = renderMessage({ role: 'assistant', content: '', model: model }, aiMsgIndex, true);
         const contentDiv = aiMessageContainer.querySelector('.message-content');
         
@@ -245,7 +239,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({ model }),
-                signal: currentAbortController.signal // Pass the signal
+                signal: currentAbortController.signal
             });
 
             if (!response.ok) throw new Error(await response.text());
@@ -254,28 +248,24 @@ document.addEventListener('DOMContentLoaded', () => {
             const decoder = new TextDecoder();
             let fullContent = "";
             
-            // 2. Stream content into the placeholder
             while(true) {
                 const { value, done } = await reader.read();
                 if (done) break;
                 
                 fullContent += decoder.decode(value, { stream: true });
-                // Use marked.parse for real-time preview (optional but nice)
                 contentDiv.innerHTML = marked.parse(fullContent + '<span class="loading-pulse"></span>');
                 chatWindow.scrollTop = chatWindow.scrollHeight;
             }
             
-            // 3. Remove the placeholder and render the final, complete message
             aiMessageContainer.remove();
             const finalMessage = { role: 'assistant', content: fullContent, model: model };
             renderMessage(finalMessage, aiMsgIndex);
-            // After successful response, reload chat list in case title was generated
             if (document.querySelectorAll('.message-container').length <= 2) {
                  await loadChatList();
             }
 
         } catch (error) {
-            aiMessageContainer.remove(); // Also remove on error
+            aiMessageContainer.remove();
             if (error.name === 'AbortError') {
                 renderMessage({role: 'assistant', content: '*Request cancelled by user.*'}, aiMsgIndex);
             } else {
@@ -290,19 +280,16 @@ document.addEventListener('DOMContentLoaded', () => {
         const model = modelSelector.value;
         if (!newPrompt || !model || !editState) return;
 
-        // THE FIX: Abort previous request and create a new controller
         if (currentAbortController) {
             currentAbortController.abort();
         }
         currentAbortController = new AbortController();
         stopGeneratingBtn.classList.remove('hidden');
 
-        // Update the user message in the UI
         const userMsgContainer = document.querySelector(`.message-container[data-msg-index="${editState.msgIndex}"]`);
         const userMsgContent = userMsgContainer.querySelector('.message-content');
         userMsgContent.innerHTML = `<p>${newPrompt.replace(/\n/g, '<br>')}</p>`;
         
-        // Remove the old AI response and show a loading placeholder
         const oldAiMsg = document.querySelector(`.message-container[data-msg-index="${editState.msgIndex + 1}"]`);
         if (oldAiMsg) oldAiMsg.remove();
         const aiLoadingMessage = renderMessage({ role: 'assistant', content: '', model: model }, editState.msgIndex + 1, true);
@@ -322,7 +309,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
             if (!response.ok) throw new Error(data.error || "Failed to edit and regenerate.");
             
-            // Render the new, complete response
             renderMessage(data.response, editState.msgIndex + 1);
 
         } catch (error) {
@@ -334,7 +320,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 renderMessage({role: 'assistant', content: `**Error:** ${error.message}`}, editState.msgIndex + 1);
             }
         } finally {
-            // THE FIX: Reset UI state
             editState = null;
             stopGeneratingBtn.classList.add('hidden');
             currentAbortController = null;
@@ -348,7 +333,6 @@ document.addEventListener('DOMContentLoaded', () => {
         const contentDiv = messageContainer.querySelector('.message-content');
         if (!contentDiv) return;
         
-        // This is a naive way to get raw text back from HTML. A better way would be to store original text.
         const tempDiv = document.createElement('div');
         tempDiv.innerHTML = contentDiv.innerHTML.replace(/<br\s*\/?>/ig, '\n');
         const currentText = tempDiv.textContent || tempDiv.innerText || "";
@@ -367,12 +351,12 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             const response = await fetch(`/api/chat/${chatId}/message/${msgIndex}`, { method: 'DELETE' });
             if (!response.ok) throw new Error((await response.json()).error || 'Failed to delete message.');
-            // Instead of reloading the whole chat, just remove the elements
+            
             const userMsg = document.querySelector(`.message-container[data-msg-index="${msgIndex}"]`);
             const aiMsg = document.querySelector(`.message-container[data-msg-index="${msgIndex+1}"]`);
             if (userMsg) userMsg.remove();
             if (aiMsg) aiMsg.remove();
-            // Re-index remaining messages to avoid issues
+            
             document.querySelectorAll('.message-container').forEach((el, i) => el.dataset.msgIndex = i);
 
         } catch (error) {
@@ -383,36 +367,38 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const handleRegenerateMessage = async (chatId, msgIndex, modelToUse = null) => {
         const messageContainer = document.querySelector(`.message-container[data-msg-index="${msgIndex}"]`);
+        if (!messageContainer) return;
+
         const originalModel = messageContainer.querySelector('.model-tag')?.textContent;
         const model = modelToUse || originalModel || modelSelector.value;
         
-        // Remove the old message and immediately start the streaming process for the new one
-        messageContainer.remove();
+        const contentDiv = messageContainer.querySelector('.message-content');
+        const actionsDiv = messageContainer.querySelector('.message-actions');
         
-        // This requires a different backend endpoint that doesn't rely on the *last* message.
-        // Let's assume the backend can handle `regenerate`. We'll just stream into the same spot.
-        // NOTE: This logic is simplified. A robust implementation would be more complex.
-        
-        // For simplicity, we'll just reload the chat history up to the point of regeneration
-        // and then start a new stream. This is inefficient but reliable.
+        contentDiv.innerHTML = '<p><span class="loading-pulse">Regenerating...</span></p>';
+        if (actionsDiv) actionsDiv.style.display = 'none';
+
         try {
-            const chatDataRes = await fetch(`/api/chat/${chatId}`);
-            const chatData = await chatDataRes.json();
-            
-            // Trim messages to the point of regeneration
-            chatWindow.innerHTML = '';
-            chatData.messages.slice(0, msgIndex).forEach((msg, i) => renderMessage(msg, i));
-            
-            // Now stream the new response
-            await streamAndRenderResponse(chatId, model);
+            const response = await fetch(`/api/chat/${chatId}/regenerate`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ model: model, msg_index: msgIndex })
+            });
+
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.error || "Failed to regenerate response from server.");
+            }
+
+            renderMessage(data.response, msgIndex);
 
         } catch (error) {
-             console.error(error);
-             renderMessage({role: 'assistant', content: `**Error during regeneration:** ${error.message}`}, msgIndex);
+            console.error("Regeneration failed:", error);
+            contentDiv.innerHTML = `<p><strong>Error regenerating:</strong> ${error.message}</p>`;
+            if (actionsDiv) actionsDiv.style.display = 'flex';
         }
     };
     
-    // THE FIX: Rewritten render function for better control and features
     const renderMessage = (msg, index, isLoading = false) => {
         const { role, content, attachments, model } = msg;
         const container = document.createElement('div');
@@ -459,18 +445,15 @@ document.addEventListener('DOMContentLoaded', () => {
             messageContent.innerHTML = '<p><span class="loading-pulse"></span></p>';
         } else {
             let processedContent = content || "";
-            // Use marked for assistant, escape user input
             if (role === 'assistant') {
                 processedContent = marked.parse(processedContent);
             } else {
-                // Basic escaping for user content to prevent HTML injection
                 const escapedContent = processedContent.replace(/</g, "<").replace(/>/g, ">");
                 processedContent = `<p>${escapedContent.replace(/\n/g, '<br>')}</p>`;
             }
             messageContent.innerHTML = attachmentsHTML + processedContent;
         }
 
-        // Add copy button to code blocks
         if (!isLoading) {
             messageContent.querySelectorAll('pre').forEach(pre => {
                 const copyButton = document.createElement('button');
@@ -510,7 +493,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 });
                 messageActions.appendChild(regenerateGroup);
 
-            } else { // role === 'user'
+            } else {
                 const editBtn = document.createElement('button');
                 editBtn.className = 'action-btn edit-btn';
                 editBtn.title = 'Edit and Regenerate';
@@ -561,7 +544,6 @@ document.addEventListener('DOMContentLoaded', () => {
         const rect = target.getBoundingClientRect();
         popup.style.left = `${rect.left}px`;
         popup.style.top = `${rect.bottom + 5}px`;
-        // Close popup when clicking outside
         setTimeout(() => {
             document.addEventListener('click', function closePopup(e) {
                 if (!popup.contains(e.target) && e.target !== target) {
@@ -647,8 +629,11 @@ document.addEventListener('DOMContentLoaded', () => {
     
     const renderFilePreview = () => {
         filePreviewArea.innerHTML = '';
-        if (attachedFiles.length > 0) filePreviewArea.style.paddingBottom = '0.75rem';
-        else filePreviewArea.style.paddingBottom = '0';
+        if (attachedFiles.length > 0) {
+            filePreviewArea.style.paddingBottom = '0.75rem';
+        } else {
+             filePreviewArea.style.paddingBottom = '0';
+        }
         
         attachedFiles.forEach((file, index) => {
             const fileEl = document.createElement('div');
