@@ -15,6 +15,7 @@ from PIL import Image
 import fitz  # PyMuPDF
 import pillow_heif
 import docx
+from duckduckgo_search import DDGS
 
 # Register the HEIC/HEIF file format opener with Pillow.
 pillow_heif.register_heif_opener()
@@ -24,8 +25,20 @@ FIXED_VISION_MODEL = 'llava:latest'
 CHATS_DIR = Path('chats')
 ATTACHMENTS_DIR_NAME = 'attachments'
 CHATS_DIR.mkdir(exist_ok=True)
-TITLE_GENERATION_MODEL = 'mistral:latest' 
+TITLE_GENERATION_MODEL = 'mistral:latest'
 CONTEXT_WINDOW_MESSAGES = 20
+
+# System prompt to instruct the AI on how to use the web search tool.
+WEB_SEARCH_SYSTEM_PROMPT = """You are a large language model with access to a real-time web search tool.
+When the user asks a question that requires up-to-date information, financial data, or specific facts you might not know, you MUST use the search tool.
+
+To use the search tool, you must respond with a special search command in the following JSON format, and nothing else:
+<search>
+{"query": "your concise search query here"}
+</search>
+
+You will receive the search results back. After you receive the results, you MUST answer the user's original question based on the information from the search results. Do not make up information.
+"""
 
 app = Flask(__name__)
 
@@ -41,7 +54,6 @@ def prepare_messages_for_llm(messages):
         if msg.get('role') == 'user' and 'extracted_content' in msg:
             full_prompt = f"{msg['content']}\n\n--- Start of attached document content ---\n{msg['extracted_content']}\n--- End of attached document content ---"
             msg['content'] = full_prompt
-            # We can remove the extracted_content now as it's been merged
             del msg['extracted_content']
     return prepared_messages
 
@@ -102,7 +114,7 @@ def process_and_save_files(chat_id, files):
     extracted_text = ""
     if not files:
         return attachments_data, extracted_text
-        
+
     chat_attachments_dir = CHATS_DIR / chat_id / ATTACHMENTS_DIR_NAME
     chat_attachments_dir.mkdir(parents=True, exist_ok=True)
 
@@ -110,11 +122,11 @@ def process_and_save_files(chat_id, files):
         original_filename = file.filename
         unique_filename = f"{uuid.uuid4()}{Path(original_filename).suffix}"
         save_path = chat_attachments_dir / unique_filename
-        
+
         file_stream = file.stream
         file_stream.seek(0)
         file_content = file_stream.read()
-        
+
         with open(save_path, 'wb') as f:
             f.write(file_content)
 
@@ -123,7 +135,7 @@ def process_and_save_files(chat_id, files):
             "url": f"/attachments/{chat_id}/{unique_filename}",
             "type": file.content_type
         })
-        
+
         file_stream.seek(0)
         if original_filename.lower().endswith('.pdf'):
             try:
@@ -148,6 +160,75 @@ def process_and_save_files(chat_id, files):
 
     return attachments_data, extracted_text.strip()
 
+
+def _stream_response_generator(chat_id, chat_data, model):
+    """
+    Generator that handles the entire chat response process, including
+    potential web searches (tool use).
+    """
+    messages_to_process = list(chat_data['messages'])[-CONTEXT_WINDOW_MESSAGES:]
+    
+    is_web_search_turn = messages_to_process[-1]['content'].startswith('[Web Search Activated]')
+    if is_web_search_turn:
+        messages_to_process[-1]['content'] = messages_to_process[-1]['content'].replace('[Web Search Activated]', '').strip()
+        messages_to_process.insert(0, {'role': 'system', 'content': WEB_SEARCH_SYSTEM_PROMPT})
+    
+    messages_for_api = prepare_messages_for_llm(messages_to_process)
+    
+    final_model = model
+    sources_used = []
+
+    for _ in range(3): # Allow up to 3 search attempts to prevent infinite loops
+        response = ollama.chat(model=final_model, messages=messages_for_api)
+        assistant_message = response['message']
+        
+        search_match = re.search(r'<search>(.*?)</search>', assistant_message['content'], re.DOTALL)
+        
+        if not search_match:
+            # No search tool used, this is the final answer.
+            stream = ollama.chat(model=final_model, messages=messages_for_api, stream=True)
+            full_response_content = ""
+            for chunk in stream:
+                if 'content' in chunk['message']:
+                    content_piece = chunk['message']['content']
+                    full_response_content += content_piece
+                    yield content_piece
+            
+            if sources_used:
+                sources_markdown = "\n\n---\n**Sources:**\n"
+                for i, source in enumerate(sources_used):
+                    sources_markdown += f"{i+1}. [{source['title']}]({source['url']}) - *Query: {source['query']}*\n"
+                yield sources_markdown
+                full_response_content += sources_markdown
+
+            final_ai_message = {'role': 'assistant', 'content': full_response_content, 'model': final_model}
+            current_chat_data = load_chat_history(chat_id)
+            if current_chat_data:
+                current_chat_data['messages'].append(final_ai_message)
+                save_chat_history(chat_id, current_chat_data)
+            return
+
+        try:
+            search_json_str = search_match.group(1).strip()
+            search_data = json.loads(search_json_str)
+            search_query = search_data['query']
+            print(f"Model requested search for: '{search_query}'")
+
+            with DDGS() as ddgs:
+                search_results = list(ddgs.text(search_query, max_results=5))
+
+            results_text = f"Search results for '{search_query}':\n\n"
+            for i, result in enumerate(search_results):
+                results_text += f"Result {i+1}:\nTitle: {result['title']}\nURL: {result['href']}\nSnippet: {result['body']}\n\n"
+                sources_used.append({"title": result['title'], "url": result['href'], "query": search_query})
+
+            messages_for_api.append(assistant_message)
+            messages_for_api.append({'role': 'user', 'content': results_text})
+        except Exception as e:
+            print(f"Error during search tool use: {e}")
+            yield f"An error occurred while trying to perform a web search: {e}"
+            return
+
 # --- API Endpoints ---
 @app.route('/')
 def index():
@@ -166,19 +247,17 @@ def get_attachment(chat_id, filename):
 def get_models():
     try:
         response = ollama.list()
-        all_model_objects = response.get('models', [])
         text_models_as_dicts = []
-        for model_obj in all_model_objects:
+        for model_obj in response.get('models', []):
             model_name = model_obj.get('name') or model_obj.get('model')
             if model_name:
                 is_vision = 'llava' in model_name.lower() or 'vision' in model_name.lower()
                 is_embed = 'embed' in model_name.lower()
-                is_title_model = model_name == TITLE_GENERATION_MODEL
-                if not is_vision and not is_embed and not is_title_model:
+                if not is_vision and not is_embed:
                     text_models_as_dicts.append({
                         'name': model_name,
                         'modified_at': model_obj.get('modified_at'),
-                        'size': model_obj.get('size'),
+                        'size': model_obj.get('size')
                     })
         return jsonify(text_models_as_dicts)
     except Exception as e:
@@ -197,74 +276,26 @@ def get_chat_history_route(chat_id):
         abort(404, "Chat not found")
     return jsonify(chat_data)
 
-@app.route('/api/chat/initiate', methods=['POST'])
-def initiate_chat():
-    data = request.form
+@app.route('/api/chat/stream', defaults={'chat_id': None}, methods=['POST'])
+@app.route('/api/chat/<chat_id>/stream', methods=['POST'])
+def stream_message(chat_id):
+    model = request.form.get('model')
+    prompt = request.form.get('prompt', '')
     files = request.files.getlist('files')
-    prompt = data.get('prompt', '')
 
+    if not model:
+        return Response("Model not provided", status=400)
     if not prompt and not files:
-        return jsonify({"error": "Cannot start a chat with an empty message."}), 400
+        return Response("Cannot start a chat with an empty message.", status=400)
 
-    chat_id = str(uuid.uuid4())
-    title = "New Chat"
-    
-    attachments_data, extracted_text = process_and_save_files(chat_id, files)
-    
-    user_message = {"role": "user", "content": prompt}
-    if attachments_data:
-        user_message["attachments"] = attachments_data
-    if extracted_text:
-        user_message["extracted_content"] = extracted_text
-
-    chat_data = {"title": title, "messages": [user_message]}
-    save_chat_history(chat_id, chat_data)
-
-    return jsonify({
-        "chatId": chat_id,
-        "title": title,
-        "user_message": user_message
-    })
-
-@app.route('/api/chat/<chat_id>/generate_title', methods=['POST'])
-def generate_title_for_chat(chat_id):
-    chat_data = load_chat_history(chat_id)
-    if not chat_data or not chat_data.get('messages'):
-        return jsonify({"error": "Chat not found or is empty."}), 404
-        
-    first_user_prompt = ""
-    for message in chat_data['messages']:
-        if message['role'] == 'user':
-            # Use the combined prompt for better titles if there's extracted content
-            user_content = message['content']
-            extracted_content = message.get('extracted_content', '')
-            full_prompt = f"{user_content}\n\n{extracted_content}".strip()
-            first_user_prompt = full_prompt
-            break
-            
-    if not first_user_prompt:
-        return jsonify({"title": "Untitled Chat"})
-
-    new_title = generate_chat_title(first_user_prompt)
-    
-    chat_data['title'] = new_title
-    save_chat_history(chat_id, chat_data)
-    
-    return jsonify({"chatId": chat_id, "newTitle": new_title})
-
-
-@app.route('/api/chat/<chat_id>/add_message', methods=['POST'])
-def add_message_to_chat(chat_id):
-    chat_data = load_chat_history(chat_id)
-    if not chat_data:
-        return jsonify({"error": "Chat not found."}), 404
-
-    data = request.form
-    files = request.files.getlist('files')
-    prompt = data.get('prompt', '')
-
-    if not prompt and not files:
-        return jsonify({"error": "Cannot add an empty message."}), 400
+    is_new_chat = not chat_id
+    if is_new_chat:
+        chat_id = str(uuid.uuid4())
+        chat_data = {"title": "New Chat", "messages": []}
+    else:
+        chat_data = load_chat_history(chat_id)
+        if not chat_data:
+            return Response("Chat not found.", status=404)
 
     attachments_data, extracted_text = process_and_save_files(chat_id, files)
     
@@ -277,63 +308,37 @@ def add_message_to_chat(chat_id):
     chat_data['messages'].append(user_message)
     save_chat_history(chat_id, chat_data)
 
-    return jsonify({"user_message": user_message})
+    def full_stream():
+        initial_data = {"chatId": chat_id, "user_message": user_message}
+        yield json.dumps(initial_data) + '\n---\n'
+        for chunk in _stream_response_generator(chat_id, chat_data, model):
+            yield chunk
 
-@app.route('/api/chat/<chat_id>/respond', methods=['POST'])
-def get_chat_response(chat_id):
-    model = request.json.get('model')
-    if not model:
-        return Response("Model not provided", status=400)
-    
+    return Response(full_stream(), mimetype='text/plain')
+
+@app.route('/api/chat/<chat_id>/generate_title', methods=['POST'])
+def generate_title_for_chat(chat_id):
     chat_data = load_chat_history(chat_id)
-    if not chat_data:
-        return Response("Chat not found", status=404)
+    if not chat_data or not chat_data.get('messages'):
+        return jsonify({"error": "Chat not found or is empty."}), 404
+        
+    first_user_prompt = ""
+    for message in chat_data['messages']:
+        if message['role'] == 'user':
+            user_content = message['content'].replace('[Web Search Activated]', '').strip()
+            extracted_content = message.get('extracted_content', '')
+            full_prompt = f"{user_content}\n\n{extracted_content}".strip()
+            first_user_prompt = full_prompt
+            break
+            
+    if not first_user_prompt:
+        return jsonify({"title": "Untitled Chat"})
 
-    messages_to_process = list(chat_data['messages'])[-CONTEXT_WINDOW_MESSAGES:]
-    messages_for_api = prepare_messages_for_llm(messages_to_process)
+    new_title = generate_chat_title(first_user_prompt)
+    chat_data['title'] = new_title
+    save_chat_history(chat_id, chat_data)
     
-    final_model = model
-    last_user_msg_original = chat_data['messages'][-1]
-    if 'attachments' in last_user_msg_original:
-        api_user_message = messages_for_api[-1]
-        images_b64 = []
-        for att in last_user_msg_original.get('attachments', []):
-            if att.get('type', '').startswith('image/'):
-                final_model = FIXED_VISION_MODEL
-                try:
-                    filename = Path(att['url']).name
-                    attachment_path = CHATS_DIR / chat_id / ATTACHMENTS_DIR_NAME / filename
-                    with open(attachment_path, 'rb') as img_file:
-                        images_b64.append(base64.b64encode(img_file.read()).decode('utf-8'))
-                except Exception as e:
-                    print(f"Error reading attachment {att['url']}: {e}")
-        if images_b64:
-            api_user_message['images'] = images_b64
-
-    try:
-        stream = ollama.chat(model=final_model, messages=messages_for_api, stream=True)
-        def generate():
-            full_response_content = ""
-            try:
-                for chunk in stream:
-                    if 'content' in chunk['message']:
-                        content_piece = chunk['message']['content']
-                        full_response_content += content_piece
-                        yield content_piece
-            finally:
-                # THE FIX: This block executes even if the client disconnects.
-                if full_response_content:
-                    print(f"Saving partial/full response of length {len(full_response_content)} for chat {chat_id}")
-                    ai_message_dict = {'role': 'assistant', 'content': full_response_content, 'model': final_model}
-                    current_chat_data = load_chat_history(chat_id)
-                    current_chat_data['messages'].append(ai_message_dict)
-                    save_chat_history(chat_id, current_chat_data)
-
-        return Response(generate(), mimetype='text/plain')
-    except Exception as e:
-        traceback.print_exc()
-        error_message = f"Ollama API Error: {str(e)}"
-        return Response(error_message, status=500)
+    return jsonify({"chatId": chat_id, "newTitle": new_title})
         
 @app.route('/api/chat/<chat_id>/message/<int:msg_index>', methods=['DELETE'])
 def delete_message(chat_id, msg_index):
@@ -355,75 +360,26 @@ def delete_message(chat_id, msg_index):
     save_chat_history(chat_id, chat_data)
     return jsonify({"success": True})
 
-# in app.py
-
 @app.route('/api/chat/<chat_id>/regenerate', methods=['POST'])
 def regenerate_response(chat_id):
     data = request.json
     model = data.get('model')
     msg_index = data.get('msg_index')
 
-    if not model:
-        return jsonify({"error": "Model not provided."}), 400
+    if not model or msg_index is None:
+        return Response("Model and message index not provided.", status=400)
+        
     chat_data = load_chat_history(chat_id)
     if not chat_data:
-        return jsonify({"error": "Chat not found"}), 404
-    # The message to regenerate must be an assistant's response.
-    if not (0 < msg_index < len(chat_data['messages']) and chat_data['messages'][msg_index]['role'] == 'assistant'):
-        return jsonify({"error": "Invalid index for regeneration."}), 400
-    
-    # Context is all messages *before* the one being regenerated.
-    messages_to_process = chat_data['messages'][:msg_index]
-    
-    # THE FIX: Use our helper function to combine user prompt with extracted file content.
-    messages_for_api = prepare_messages_for_llm(messages_to_process)
-    
-    final_model = model
-    # The user message for this turn is the one right before the assistant's response.
-    last_user_msg_original = chat_data['messages'][msg_index - 1]
-    if 'attachments' in last_user_msg_original:
-        api_user_message = messages_for_api[-1]
-        images_b64 = []
-        for att in last_user_msg_original.get('attachments', []):
-            if att.get('type', '').startswith('image/'):
-                final_model = FIXED_VISION_MODEL
-                try:
-                    filename = Path(att['url']).name
-                    attachment_path = CHATS_DIR / chat_id / ATTACHMENTS_DIR_NAME / filename
-                    with open(attachment_path, 'rb') as img_file:
-                        images_b64.append(base64.b64encode(img_file.read()).decode('utf-8'))
-                except Exception as e:
-                    print(f"Error reading attachment {att['url']}: {e}")
-        if images_b64: 
-            api_user_message['images'] = images_b64
-    
-    try:
-        stream = ollama.chat(model=final_model, messages=messages_for_api, stream=True)
-        def generate():
-            full_response_content = ""
-            try:
-                for chunk in stream:
-                    if 'content' in chunk['message']:
-                        content_piece = chunk['message']['content']
-                        full_response_content += content_piece
-                        yield content_piece
-            finally:
-                if full_response_content:
-                    print(f"Saving partial/full regenerated response of length {len(full_response_content)} for chat {chat_id}")
-                    ai_message_dict = {
-                        'role': 'assistant',
-                        'content': full_response_content,
-                        'model': final_model
-                    }
-                    current_chat_data = load_chat_history(chat_id)
-                    # IMPORTANT: We are REPLACING the old message at the same index.
-                    current_chat_data['messages'][msg_index] = ai_message_dict
-                    save_chat_history(chat_id, current_chat_data)
+        return Response("Chat not found", status=404)
 
-        return Response(generate(), mimetype='text/plain')
-    except Exception as e:
-        traceback.print_exc()
-        return Response(f"Ollama API Error: {e}", status=500)
+    if not (0 <= msg_index < len(chat_data['messages']) and chat_data['messages'][msg_index]['role'] == 'assistant'):
+        return Response("Invalid index for regeneration.", status=400)
+    
+    chat_data['messages'] = chat_data['messages'][:msg_index]
+    save_chat_history(chat_id, chat_data)
+    
+    return Response(_stream_response_generator(chat_id, chat_data, model), mimetype='text/plain')
 
 @app.route('/api/chat/<chat_id>/edit_and_regenerate', methods=['POST'])
 def edit_and_regenerate(chat_id):
@@ -443,40 +399,23 @@ def edit_and_regenerate(chat_id):
 
     chat_data['messages'][msg_index]['content'] = new_prompt
     chat_data['messages'] = chat_data['messages'][:msg_index + 1]
+    save_chat_history(chat_id, chat_data)
         
-    messages_to_process = chat_data['messages']
-    messages_for_api = prepare_messages_for_llm(messages_to_process)
+    messages_for_api = prepare_messages_for_llm(chat_data['messages'])
     
-    final_model = model
-    last_user_msg_original = chat_data['messages'][-1]
-    if 'attachments' in last_user_msg_original:
-        api_user_message = messages_for_api[-1]
-        images_b64 = []
-        for att in last_user_msg_original.get('attachments', []):
-            if att.get('type', '').startswith('image/'):
-                final_model = FIXED_VISION_MODEL
-                try:
-                    filename = Path(att['url']).name
-                    attachment_path = CHATS_DIR / chat_id / ATTACHMENTS_DIR_NAME / filename
-                    with open(attachment_path, 'rb') as img_file:
-                        images_b64.append(base64.b64encode(img_file.read()).decode('utf-8'))
-                except Exception as e:
-                    print(f"Error reading attachment {att['url']}: {e}")
-        if images_b64: 
-            api_user_message['images'] = images_b64
-
     try:
-        response = ollama.chat(model=final_model, messages=messages_for_api)
-        raw_ai_message = response['message']
-        ai_message_dict = { 'role': raw_ai_message['role'], 'content': raw_ai_message['content'], 'model': final_model }
+        response = ollama.chat(model=model, messages=messages_for_api)
+        ai_message_dict = response['message']
+        ai_message_dict['model'] = model
         
-        chat_data['messages'].append(ai_message_dict)
-        save_chat_history(chat_id, chat_data)
+        current_chat_data = load_chat_history(chat_id)
+        current_chat_data['messages'].append(ai_message_dict)
+        save_chat_history(chat_id, current_chat_data)
         
         return jsonify({"response": ai_message_dict})
     except Exception as e:
         traceback.print_exc()
-        return jsonify({"error": f"Error during edit and regeneration: {e}"}), 500
+        return jsonify({"error": f"Error during edit and regeneration: {str(e)}"}), 500
 
 @app.route('/api/chat/<chat_id>', methods=['DELETE'])
 def delete_chat(chat_id):

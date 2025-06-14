@@ -2,3 +2,4 @@ chats
 /chats
 history.json
 venv
+.DS_Store
