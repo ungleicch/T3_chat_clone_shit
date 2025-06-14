@@ -355,6 +355,8 @@ def delete_message(chat_id, msg_index):
     save_chat_history(chat_id, chat_data)
     return jsonify({"success": True})
 
+# in app.py
+
 @app.route('/api/chat/<chat_id>/regenerate', methods=['POST'])
 def regenerate_response(chat_id):
     data = request.json
@@ -366,13 +368,18 @@ def regenerate_response(chat_id):
     chat_data = load_chat_history(chat_id)
     if not chat_data:
         return jsonify({"error": "Chat not found"}), 404
-    if not (0 <= msg_index < len(chat_data['messages']) and chat_data['messages'][msg_index]['role'] == 'assistant'):
+    # The message to regenerate must be an assistant's response.
+    if not (0 < msg_index < len(chat_data['messages']) and chat_data['messages'][msg_index]['role'] == 'assistant'):
         return jsonify({"error": "Invalid index for regeneration."}), 400
     
+    # Context is all messages *before* the one being regenerated.
     messages_to_process = chat_data['messages'][:msg_index]
+    
+    # THE FIX: Use our helper function to combine user prompt with extracted file content.
     messages_for_api = prepare_messages_for_llm(messages_to_process)
     
     final_model = model
+    # The user message for this turn is the one right before the assistant's response.
     last_user_msg_original = chat_data['messages'][msg_index - 1]
     if 'attachments' in last_user_msg_original:
         api_user_message = messages_for_api[-1]
@@ -401,7 +408,6 @@ def regenerate_response(chat_id):
                         full_response_content += content_piece
                         yield content_piece
             finally:
-                # THE FIX: This block executes even if the client disconnects.
                 if full_response_content:
                     print(f"Saving partial/full regenerated response of length {len(full_response_content)} for chat {chat_id}")
                     ai_message_dict = {
@@ -410,6 +416,7 @@ def regenerate_response(chat_id):
                         'model': final_model
                     }
                     current_chat_data = load_chat_history(chat_id)
+                    # IMPORTANT: We are REPLACING the old message at the same index.
                     current_chat_data['messages'][msg_index] = ai_message_dict
                     save_chat_history(chat_id, current_chat_data)
 

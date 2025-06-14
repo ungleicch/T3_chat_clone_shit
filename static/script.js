@@ -1,3 +1,5 @@
+// in script.js, at the top
+
 document.addEventListener('DOMContentLoaded', () => {
     // --- DOM Elements ---
     const chatList = document.getElementById('chat-list');
@@ -5,26 +7,110 @@ document.addEventListener('DOMContentLoaded', () => {
     const chatWindow = document.getElementById('chat-window');
     const chatForm = document.getElementById('chat-form');
     const promptInput = document.getElementById('prompt-input');
-    const modelSelector = document.getElementById('model-selector');
-    const attachBtn = document.getElementById('attach-btn');
+    // NEW: Get containers for dynamic elements
+    const mainModelSelectorContainer = document.getElementById('main-model-selector-container');
+    const attachFileBtn = document.getElementById('attach-file-btn');
     const fileInput = document.getElementById('file-input');
     const filePreviewArea = document.getElementById('file-preview-area');
     const searchThreadsInput = document.getElementById('search-threads-input');
     const stopGeneratingBtn = document.getElementById('stop-generating-btn');
     const sendBtn = document.getElementById('send-btn');
 
+    // NEW: Global state for models
     let currentChatId = null;
     let attachedFiles = [];
     let currentAbortController = null;
     let editState = null;
+    let availableModels = []; 
+    let selectedModel = null; 
     
-    // --- SVG Icons for easy reuse ---
+    // NEW: Updated icons
     const ICONS = {
         user: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512" width="1em" height="1em"><path fill="currentColor" d="M224 256A128 128 0 1 0 224 0a128 128 0 1 0 0 256zm-45.7 48C79.8 304 0 383.8 0 482.3C0 498.7 13.3 512 29.7 512H418.3c16.4 0 29.7-13.3 29.7-29.7C448 383.8 368.2 304 269.7 304H178.3z"/></svg>`,
         assistant: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="1em" height="1em"><path fill="currentColor" d="M256 0c17.7 0 32 14.3 32 32V64H448c17.7 0 32 14.3 32 32s-14.3 32-32 32H352v32c0 17.7-14.3 32-32 32s-32-14.3-32-32V128H224v32c0 17.7-14.3 32-32 32s-32-14.3-32-32V128H64c-17.7 0-32-14.3-32-32s14.3-32 32-32H224V32c0-17.7 14.3-32 32-32zM400 480H112c-26.5 0-48-21.5-48-48V288H448V432c0 26.5-21.5 48-48 48zM256 224a32 32 0 1 1 0 64 32 32 0 1 1 0-64zm-96 32a32 32 0 1 1 64 0 32 32 0 1 1 -64 0zm192-32a32 32 0 1 1 0 64 32 32 0 1 1 0-64z"/></svg>`,
-        regenerate: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="1em" height="1em"><path fill="currentColor" d="M463.5 224H472c13.3 0 24-10.7 24-24V72c0-9.7-5.8-18.5-14.8-22.2s-19.3-1.7-26.2 5.2L413.4 96.6c-87.6-86.5-228.7-86.2-315.8 1c-87.5 87.5-87.5 229.3 0 316.8s229.3 87.5 316.8 0c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0c-62.5 62.5-163.8 62.5-226.3 0s-62.5-163.8 0-226.3c62.2-62.2 162.7-62.5 225.3-1L327 183c-6.9 6.9-8.9 17.2-5.2 26.2s12.5 14.8 22.2 14.8H463.5z"/></svg>`,
-        delete: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512" width="1em" height="1em"><path fill="currentColor" d="M135.2 17.7L128 32H32C14.3 32 0 46.3 0 64S14.3 96 32 96H416c17.7 0 32-14.3 32-32s-14.3-32-32-32H320l-7.2-14.3C307.4 6.8 296.3 0 284.2 0H163.8c-12.1 0-23.2 6.8-28.6 17.7zM416 128H32L53.2 467c1.6 25.3 22.6 45 47.9 45H346.9c25.3 0 46.3-19.7 47.9-45L416 128z"/></svg>`,
-        edit: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><path fill="currentColor" d="M471.6 21.7c-21.9-21.9-57.3-21.9-79.2 0L362.3 51.7l97.9 97.9 30.1-30.1c21.9-21.9 21.9-57.3 0-79.2L471.6 21.7zm-299.2 220c-6.1 6.1-10.8 13.6-13.5 21.9l-29.6 88.8c-2.9 8.6-.6 18.1 5.8 24.6s15.9 8.7 24.6 5.8l88.8-29.6c8.2-2.7 15.8-7.4 21.9-13.5L437.7 172.3 339.7 74.3 172.4 241.7zM96 64C43 64 0 107 0 160V416c0 53 43 96 96 96H352c53 0 96-43 96-96V320c0-17.7-14.3-32-32-32s-32 14.3-32 32v96c0 17.7-14.3 32-32 32H96c-17.7 0-32-14.3-32-32V160c0-17.7 14.3-32 32-32h96c17.7 0 32-14.3 32-32s-14.3-32-32-32H96z"/></svg>`,
+        edit: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><path fill="currentColor" d="M362.7 19.3L314.3 67.7 444.3 197.7l48.4-48.4c25-25 25-65.5 0-90.5L453.3 19.3c-25-25-65.5-25-90.5 0zm-71 71L58.6 323.5c-10.4 10.4-18 23.3-22.2 37.4L1 480.7c-3.2 10.8 7.2 21.2 18 18l120-35.4c14.1-4.2 27-11.8 37.4-22.2L421.7 220.3 291.7 90.3z"/></svg>`,
+        delete: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><path fill="currentColor" d="M135.2 17.7L128 32H32C14.3 32 0 46.3 0 64s14.3 96 32 96H416c17.7 0 32-14.3 32-32s-14.3-32-32-32H320l-7.2-14.3C307.4 6.8 296.3 0 284.2 0H163.8c-12.1 0-23.2 6.8-28.6 17.7zM416 128H32L53.2 467c1.6 25.3 22.6 45 47.9 45H346.9c25.3 0 46.3-19.7 47.9-45L416 128z"/></svg>`,
+        regenerate: `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><path fill="currentColor" d="M105.1 202.6c7.7-21.8 20.2-42.3 37.8-59.8c62.5-62.5 163.8-62.5 226.3 0L386.3 160H336c-17.7 0-32 14.3-32 32s14.3 32 32 32H464c17.7 0 32-14.3 32-32V64c0-17.7-14.3-32-32-32s-32 14.3-32 32v51.2L414.4 97.6c-87.5-87.5-229.3-87.5-316.8 0C73.2 122 55.6 150.7 44.8 181.4c-5.9 16.7 2.9 34.9 19.5 40.8s34.9-2.9 40.8-19.5zM39 289.3c-5 1.5-9.8 4.2-13.7 8.2c-4 4-6.7 8.8-8.1 14c-7.7 21.8-20.2 42.3-37.8 59.8c-62.5 62.5-163.8 62.5-226.3 0l-17-17c-12.5-12.5-12.5-32.8 0-45.3s32.8-12.5 45.3 0l17 17c37.5 37.5 98.3 37.5 135.8 0c17.6-17.6 30-38.1 37.8-59.8c5.9-16.7-2.9-34.9-19.5-40.8s-34.9 2.9-40.8 19.5z"/></svg>`
+    };
+
+    // in script.js, after the ICONS object
+
+    const generateModelAvatar = (modelName) => {
+        let hash = 0;
+        if (!modelName || modelName.length === 0) {
+            modelName = "default";
+        }
+        for (let i = 0; i < modelName.length; i++) {
+            hash = modelName.charCodeAt(i) + ((hash << 5) - hash);
+            hash |= 0;
+        }
+        
+        const hue = Math.abs(hash % 360);
+        const saturation = 70 + (Math.abs(hash) % 10);
+        const lightness = 40 + (Math.abs(hash) % 10);
+        
+        const color1 = `hsl(${hue}, ${saturation}%, ${lightness}%)`;
+        const color2 = `hsl(${(hue + 40) % 360}, ${saturation}%, ${lightness - 10}%)`;
+        const angle = Math.abs(hash % 360);
+
+        return `<div class="model-avatar-inner" style="background: linear-gradient(${angle}deg, ${color1}, ${color2});"></div>`;
+    };
+
+    const setSelectedModel = (modelName) => {
+        selectedModel = modelName;
+        
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'model-selector-button';
+        button.title = `Change model (current: ${modelName})`;
+        button.innerHTML = generateModelAvatar(modelName);
+        button.onclick = (e) => {
+            e.stopPropagation();
+            showModelSelectorPopup(e.currentTarget, (newModel) => {
+                setSelectedModel(newModel);
+            });
+        };
+        
+        mainModelSelectorContainer.innerHTML = '';
+        mainModelSelectorContainer.appendChild(button);
+    };
+
+    const showModelSelectorPopup = (targetElement, onSelectCallback) => {
+        document.querySelectorAll('.model-selector-popup').forEach(p => p.remove());
+
+        const popup = document.createElement('div');
+        popup.className = 'model-selector-popup';
+
+        availableModels.forEach(model => {
+            const item = document.createElement('div');
+            item.className = 'model-popup-item';
+            item.dataset.modelName = model.name;
+            item.innerHTML = `
+                <div class="model-avatar">${generateModelAvatar(model.name)}</div>
+                <span class="model-name">${model.name}</span>
+            `;
+            item.onclick = () => {
+                onSelectCallback(model.name);
+                popup.remove();
+            };
+            popup.appendChild(item);
+        });
+
+        document.body.appendChild(popup);
+        const rect = targetElement.getBoundingClientRect();
+        popup.style.left = `${rect.left}px`;
+        popup.style.top = `auto`;
+        popup.style.bottom = `${window.innerHeight - rect.top + 10}px`;
+        popup.classList.add('visible');
+
+        setTimeout(() => {
+            document.addEventListener('click', function closePopup(e) {
+                if (!popup.contains(e.target)) {
+                    popup.remove();
+                    document.removeEventListener('click', closePopup);
+                }
+            }, { once: true });
+        }, 0);
     };
 
     const init = () => {
@@ -47,27 +133,22 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             const response = await fetch('/api/models');
             if (!response.ok) throw new Error((await response.json()).error || 'Failed to load models.');
-            const models = await response.json();
-            modelSelector.innerHTML = '';
-            if (!models || models.length === 0) {
-                modelSelector.innerHTML = `<option value="" disabled selected>No text models found</option>`;
+            availableModels = await response.json();
+            
+            if (!availableModels || availableModels.length === 0) {
+                mainModelSelectorContainer.innerHTML = '<div class="model-selector-button-placeholder">No Models</div>';
                 promptInput.placeholder = "No models available. Please start Ollama.";
-                document.getElementById('send-btn').disabled = true;
+                sendBtn.disabled = true;
             } else {
-                 models.forEach(model => {
-                    const option = document.createElement('option');
-                    option.value = model.name;
-                    option.textContent = model.name;
-                    modelSelector.appendChild(option);
-                });
+                setSelectedModel(availableModels[0].name);
                 promptInput.placeholder = "Type your message here...";
-                document.getElementById('send-btn').disabled = false;
+                sendBtn.disabled = false;
             }
         } catch (error) {
             console.error('Error loading models:', error);
-            modelSelector.innerHTML = `<option value="" disabled selected>Error loading models</option>`;
+            mainModelSelectorContainer.innerHTML = '<div class="model-selector-button-placeholder">Error</div>';
             promptInput.placeholder = "Could not connect to Ollama.";
-            document.getElementById('send-btn').disabled = true;
+            sendBtn.disabled = true;
         }
     };
 
@@ -106,7 +187,6 @@ document.addEventListener('DOMContentLoaded', () => {
         newChatBtn.addEventListener('click', createNewChat);
         chatForm.addEventListener('submit', handleFormSubmit);
         promptInput.addEventListener('input', autoResizeTextarea);
-        attachBtn.addEventListener('click', () => fileInput.click());
         fileInput.addEventListener('change', handleFileSelection);
         searchThreadsInput.addEventListener('input', filterChatList);
         promptInput.addEventListener('keydown', (e) => {
@@ -129,9 +209,25 @@ document.addEventListener('DOMContentLoaded', () => {
         stopGeneratingBtn.addEventListener('click', () => {
             if (currentAbortController) {
                 currentAbortController.abort();
-                console.log("Request aborted by user.");
             }
         });
+        attachFileBtn.addEventListener('click', () => fileInput.click());
+    };
+
+    // NEW: Function to handle the tools popup menu
+    const toggleToolsPopup = () => {
+        const isVisible = toolsPopup.classList.toggle('visible');
+        toolsBtn.classList.toggle('active', isVisible);
+        
+        if (isVisible) {
+            document.addEventListener('click', function closeOnClickOutside(e) {
+                if (!toolsPopup.contains(e.target) && e.target !== toolsBtn) {
+                    toolsPopup.classList.remove('visible');
+                    toolsBtn.classList.remove('active');
+                    document.removeEventListener('click', closeOnClickOutside);
+                }
+            }, { once: true });
+        }
     };
 
     const createNewChat = () => {
@@ -159,7 +255,8 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         const prompt = promptInput.value.trim();
-        const model = modelSelector.value;
+        // NEW: Use the global selectedModel variable
+        const model = selectedModel; 
         if ((!prompt && attachedFiles.length === 0) || !model) {
             alert("Please select a model and enter a prompt or attach a file.");
             return;
@@ -169,6 +266,8 @@ document.addEventListener('DOMContentLoaded', () => {
             currentAbortController.abort();
         }
         currentAbortController = new AbortController();
+        // THE FIX: Toggle button visibility
+        sendBtn.classList.add('hidden');
         stopGeneratingBtn.classList.remove('hidden');
 
         let chatIdToUse = currentChatId;
@@ -236,16 +335,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 renderMessage({role: 'assistant', content: `**Error:** ${error.message}`}, -1);
             }
         } finally {
+            sendBtn.classList.remove('hidden');
             stopGeneratingBtn.classList.add('hidden');
             currentAbortController = null;
         }
     };
     
-    /**
-     * The single, robust function for handling all streaming AI responses.
-     */
-    // in script.js
-
     async function executeStream(endpoint, method, body, msgIndex) {
         const model = body.model;
         const aiMessageContainer = renderMessage({ role: 'assistant', content: '', model: model }, msgIndex, true);
@@ -283,29 +378,24 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
         } catch (error) {
-            // THE FIX: Differentiate between a user abort and a real error.
             if (error.name === 'AbortError') {
                 console.log("Stream aborted by user. Finalizing content.");
-                wasAborted = true; // Mark as aborted and continue to final render.
+                wasAborted = true;
             } else {
-                // This is a real network or server error, so display it.
                 aiMessageContainer.remove();
                 console.error("Response streaming error:", error);
                 renderMessage({role: 'assistant', content: `**Error:** ${error.message}`}, msgIndex);
-                return; // Stop execution here for real errors.
+                return;
             }
         }
             
-        // This code now runs on a successful completion OR a user-initiated abort.
         aiMessageContainer.remove();
         
-        // If aborted, add a note to the content. Otherwise, content is as-is.
         const finalContent = wasAborted ? fullContent + "\n\n*(Generation stopped by user)*" : fullContent;
         const finalMessage = { role: 'assistant', content: finalContent, model: model };
         
         const finalMessageContainer = renderMessage(finalMessage, msgIndex);
         
-        // Respect the user's scroll position on the final render.
         const isScrolledToBottomAfterRender = chatWindow.scrollHeight - chatWindow.clientHeight <= chatWindow.scrollTop + scrollBuffer;
         if (isScrolledToBottomAfterRender) {
             finalMessageContainer.scrollIntoView({ behavior: 'auto', block: 'end' });
@@ -395,6 +485,8 @@ document.addEventListener('DOMContentLoaded', () => {
             currentAbortController.abort();
         }
         currentAbortController = new AbortController();
+        // THE FIX: Toggle button visibility
+        sendBtn.classList.add('hidden');
         stopGeneratingBtn.classList.remove('hidden');
 
         const originalModel = modelToUse || document.querySelector(`.message-container[data-msg-index="${msgIndex}"] .model-tag`)?.textContent || modelSelector.value;
@@ -414,11 +506,13 @@ document.addEventListener('DOMContentLoaded', () => {
                  renderMessage({role: 'assistant', content: `**Error regenerating:** ${error.message}`}, msgIndex);
             }
         } finally {
+             sendBtn.classList.remove('hidden');
              stopGeneratingBtn.classList.add('hidden');
              currentAbortController = null;
         }
     };
     
+
     const renderMessage = (msg, index, isLoading = false) => {
         const { role, content, attachments, model } = msg;
         const container = document.createElement('div');
@@ -427,8 +521,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const profilePic = document.createElement('div');
         profilePic.className = 'profile-pic';
-        profilePic.innerHTML = ICONS[role] || '';
-
+        if (role === 'assistant') {
+            profilePic.innerHTML = generateModelAvatar(model || 'assistant');
+        } else {
+            profilePic.innerHTML = ICONS.user;
+        }
+        
         const messageBubble = document.createElement('div');
         messageBubble.className = 'message-bubble';
         
@@ -501,35 +599,48 @@ document.addEventListener('DOMContentLoaded', () => {
             messageActions.className = 'message-actions';
             
             if (role === 'assistant') {
+                // THE FIX: Create a container for the split button
                 const regenerateGroup = document.createElement('div');
                 regenerateGroup.className = 'regenerate-group';
-                regenerateGroup.innerHTML = `
-                    <button class="action-btn main-action-btn regenerate-btn" title="Regenerate">${ICONS.regenerate}</button>
-                    <button class="action-btn options-btn" title="Regenerate with another model">▾</button>
-                `;
-                regenerateGroup.querySelector('.regenerate-btn').addEventListener('click', () => handleRegenerateMessage(currentChatId, index));
-                regenerateGroup.querySelector('.options-btn').addEventListener('click', (e) => {
+                
+                // Button 1: Simple Regenerate
+                const regenerateBtn = document.createElement('button');
+                regenerateBtn.className = 'action-btn';
+                regenerateBtn.title = 'Regenerate';
+                regenerateBtn.innerHTML = ICONS.regenerate;
+                regenerateBtn.onclick = () => handleRegenerateMessage(currentChatId, index, model);
+                
+                // Button 2: Regenerate with a different model
+                const optionsBtn = document.createElement('button');
+                optionsBtn.className = 'action-btn';
+                optionsBtn.title = 'Regenerate with another model';
+                // A simple chevron down icon
+                optionsBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="1em" height="1em"><path fill="currentColor" d="M233.4 406.6c12.5 12.5 32.8 12.5 45.3 0l192-192c12.5-12.5 12.5-32.8 0-45.3s-32.8-12.5-45.3 0L256 338.7 86.6 169.4c-12.5-12.5-32.8-12.5-45.3 0s-12.5 32.8 0 45.3l192 192z"/></svg>`;
+                optionsBtn.onclick = (e) => {
                     e.stopPropagation();
-                    toggleModelPopup(e.currentTarget, (selectedModel) => {
-                        handleRegenerateMessage(currentChatId, index, selectedModel);
+                    showModelSelectorPopup(e.currentTarget, (newModel) => {
+                        handleRegenerateMessage(currentChatId, index, newModel);
                     });
-                });
+                };
+
+                regenerateGroup.appendChild(regenerateBtn);
+                regenerateGroup.appendChild(optionsBtn);
                 messageActions.appendChild(regenerateGroup);
 
-            } else {
+            } else { // role === 'user'
                 const editBtn = document.createElement('button');
-                editBtn.className = 'action-btn edit-btn';
+                editBtn.className = 'action-btn';
                 editBtn.title = 'Edit and Regenerate';
                 editBtn.innerHTML = ICONS.edit;
-                editBtn.addEventListener('click', () => handleEditMessage(currentChatId, index));
+                editBtn.onclick = () => handleEditMessage(currentChatId, index);
                 messageActions.appendChild(editBtn);
             }
             
             const deleteBtn = document.createElement('button');
-            deleteBtn.className = 'action-btn delete-btn';
+            deleteBtn.className = 'action-btn';
             deleteBtn.title = 'Delete';
             deleteBtn.innerHTML = ICONS.delete;
-            deleteBtn.addEventListener('click', () => handleDeleteMessage(currentChatId, index));
+            deleteBtn.onclick = () => handleDeleteMessage(currentChatId, index);
             messageActions.appendChild(deleteBtn);
             
             messageBubble.appendChild(messageActions);
