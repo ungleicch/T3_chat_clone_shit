@@ -244,6 +244,8 @@ document.addEventListener('DOMContentLoaded', () => {
     /**
      * The single, robust function for handling all streaming AI responses.
      */
+    // in script.js
+
     async function executeStream(endpoint, method, body, msgIndex) {
         const model = body.model;
         const aiMessageContainer = renderMessage({ role: 'assistant', content: '', model: model }, msgIndex, true);
@@ -251,6 +253,7 @@ document.addEventListener('DOMContentLoaded', () => {
         
         const scrollBuffer = 50; 
         let fullContent = "";
+        let wasAborted = false;
 
         try {
             const response = await fetch(endpoint, {
@@ -272,31 +275,40 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (done) break;
                 
                 fullContent += decoder.decode(value, { stream: true });
-                // Use marked.js to render live formatting. This will disrupt text selection.
                 contentDiv.innerHTML = marked.parse(fullContent + '<span class="loading-pulse"></span>');
                 
                 if (isScrolledToBottom) {
                     chatWindow.scrollTop = chatWindow.scrollHeight;
                 }
             }
-            
-            // Final render to apply syntax highlighting and copy buttons
-            aiMessageContainer.remove();
-            const finalMessageContainer = renderMessage({ role: 'assistant', content: fullContent, model: model }, msgIndex);
-            
-            const isScrolledToBottomAfterRender = chatWindow.scrollHeight - chatWindow.clientHeight <= chatWindow.scrollTop + scrollBuffer;
-            if (isScrolledToBottomAfterRender) {
-                finalMessageContainer.scrollIntoView({ behavior: 'auto', block: 'end' });
-            }
 
         } catch (error) {
-            aiMessageContainer.remove();
+            // THE FIX: Differentiate between a user abort and a real error.
             if (error.name === 'AbortError') {
-                renderMessage({role: 'assistant', content: '*Request cancelled by user.*'}, msgIndex);
+                console.log("Stream aborted by user. Finalizing content.");
+                wasAborted = true; // Mark as aborted and continue to final render.
             } else {
+                // This is a real network or server error, so display it.
+                aiMessageContainer.remove();
                 console.error("Response streaming error:", error);
                 renderMessage({role: 'assistant', content: `**Error:** ${error.message}`}, msgIndex);
+                return; // Stop execution here for real errors.
             }
+        }
+            
+        // This code now runs on a successful completion OR a user-initiated abort.
+        aiMessageContainer.remove();
+        
+        // If aborted, add a note to the content. Otherwise, content is as-is.
+        const finalContent = wasAborted ? fullContent + "\n\n*(Generation stopped by user)*" : fullContent;
+        const finalMessage = { role: 'assistant', content: finalContent, model: model };
+        
+        const finalMessageContainer = renderMessage(finalMessage, msgIndex);
+        
+        // Respect the user's scroll position on the final render.
+        const isScrolledToBottomAfterRender = chatWindow.scrollHeight - chatWindow.clientHeight <= chatWindow.scrollTop + scrollBuffer;
+        if (isScrolledToBottomAfterRender) {
+            finalMessageContainer.scrollIntoView({ behavior: 'auto', block: 'end' });
         }
     }
 

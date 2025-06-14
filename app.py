@@ -7,6 +7,7 @@ from io import BytesIO
 from pathlib import Path
 import traceback
 import re
+import copy
 
 from flask import Flask, request, jsonify, render_template, abort, send_from_directory, Response
 import ollama
@@ -27,6 +28,22 @@ TITLE_GENERATION_MODEL = 'mistral:latest'
 CONTEXT_WINDOW_MESSAGES = 20
 
 app = Flask(__name__)
+
+# --- Helper Function to Prepare Messages for Ollama ---
+def prepare_messages_for_llm(messages):
+    """
+    Creates a deep copy of messages and combines user content with
+    extracted file content for the LLM. This prevents modifying the
+    original chat history data.
+    """
+    prepared_messages = copy.deepcopy(messages)
+    for msg in prepared_messages:
+        if msg.get('role') == 'user' and 'extracted_content' in msg:
+            full_prompt = f"{msg['content']}\n\n--- Start of attached document content ---\n{msg['extracted_content']}\n--- End of attached document content ---"
+            msg['content'] = full_prompt
+            # We can remove the extracted_content now as it's been merged
+            del msg['extracted_content']
+    return prepared_messages
 
 # --- Chat History Management (Folder-based) ---
 def get_all_chats_from_disk():
@@ -180,31 +197,6 @@ def get_chat_history_route(chat_id):
         abort(404, "Chat not found")
     return jsonify(chat_data)
 
-@app.route('/api/chat/<chat_id>/generate_title', methods=['POST'])
-def generate_title_for_chat(chat_id):
-    chat_data = load_chat_history(chat_id)
-    if not chat_data or not chat_data.get('messages'):
-        return jsonify({"error": "Chat not found or is empty."}), 404
-        
-    # Find the first user message to generate the title from.
-    first_user_prompt = ""
-    for message in chat_data['messages']:
-        if message['role'] == 'user':
-            first_user_prompt = message['content']
-            break
-            
-    if not first_user_prompt:
-        return jsonify({"title": "Untitled Chat"}) # Nothing to generate from
-
-    # Generate the real title.
-    new_title = generate_chat_title(first_user_prompt)
-    
-    # Save the new title to the chat history file.
-    chat_data['title'] = new_title
-    save_chat_history(chat_id, chat_data)
-    
-    return jsonify({"chatId": chat_id, "newTitle": new_title})
-
 @app.route('/api/chat/initiate', methods=['POST'])
 def initiate_chat():
     data = request.form
@@ -215,26 +207,51 @@ def initiate_chat():
         return jsonify({"error": "Cannot start a chat with an empty message."}), 400
 
     chat_id = str(uuid.uuid4())
-    
-    # THE FIX: Use a temporary title immediately.
-    title = "New Chat" 
+    title = "New Chat"
     
     attachments_data, extracted_text = process_and_save_files(chat_id, files)
-    full_prompt = f"{prompt}\n\n{extracted_text}".strip()
-
-    user_message = {"role": "user", "content": full_prompt}
+    
+    user_message = {"role": "user", "content": prompt}
     if attachments_data:
         user_message["attachments"] = attachments_data
+    if extracted_text:
+        user_message["extracted_content"] = extracted_text
 
-    # Save with the temporary title first.
     chat_data = {"title": title, "messages": [user_message]}
     save_chat_history(chat_id, chat_data)
 
     return jsonify({
         "chatId": chat_id,
-        "title": title, # Return the temporary title
+        "title": title,
         "user_message": user_message
     })
+
+@app.route('/api/chat/<chat_id>/generate_title', methods=['POST'])
+def generate_title_for_chat(chat_id):
+    chat_data = load_chat_history(chat_id)
+    if not chat_data or not chat_data.get('messages'):
+        return jsonify({"error": "Chat not found or is empty."}), 404
+        
+    first_user_prompt = ""
+    for message in chat_data['messages']:
+        if message['role'] == 'user':
+            # Use the combined prompt for better titles if there's extracted content
+            user_content = message['content']
+            extracted_content = message.get('extracted_content', '')
+            full_prompt = f"{user_content}\n\n{extracted_content}".strip()
+            first_user_prompt = full_prompt
+            break
+            
+    if not first_user_prompt:
+        return jsonify({"title": "Untitled Chat"})
+
+    new_title = generate_chat_title(first_user_prompt)
+    
+    chat_data['title'] = new_title
+    save_chat_history(chat_id, chat_data)
+    
+    return jsonify({"chatId": chat_id, "newTitle": new_title})
+
 
 @app.route('/api/chat/<chat_id>/add_message', methods=['POST'])
 def add_message_to_chat(chat_id):
@@ -250,11 +267,12 @@ def add_message_to_chat(chat_id):
         return jsonify({"error": "Cannot add an empty message."}), 400
 
     attachments_data, extracted_text = process_and_save_files(chat_id, files)
-    full_prompt = f"{prompt}\n\n{extracted_text}".strip()
-
-    user_message = {"role": "user", "content": full_prompt}
+    
+    user_message = {"role": "user", "content": prompt}
     if attachments_data:
         user_message["attachments"] = attachments_data
+    if extracted_text:
+        user_message["extracted_content"] = extracted_text
     
     chat_data['messages'].append(user_message)
     save_chat_history(chat_id, chat_data)
@@ -271,14 +289,15 @@ def get_chat_response(chat_id):
     if not chat_data:
         return Response("Chat not found", status=404)
 
-    messages_for_api = list(chat_data['messages'])[-CONTEXT_WINDOW_MESSAGES:]
-    last_user_msg = messages_for_api[-1]
+    messages_to_process = list(chat_data['messages'])[-CONTEXT_WINDOW_MESSAGES:]
+    messages_for_api = prepare_messages_for_llm(messages_to_process)
+    
     final_model = model
-
-    if 'attachments' in last_user_msg:
-        api_user_message = last_user_msg.copy()
+    last_user_msg_original = chat_data['messages'][-1]
+    if 'attachments' in last_user_msg_original:
+        api_user_message = messages_for_api[-1]
         images_b64 = []
-        for att in api_user_message.get('attachments', []):
+        for att in last_user_msg_original.get('attachments', []):
             if att.get('type', '').startswith('image/'):
                 final_model = FIXED_VISION_MODEL
                 try:
@@ -290,7 +309,6 @@ def get_chat_response(chat_id):
                     print(f"Error reading attachment {att['url']}: {e}")
         if images_b64:
             api_user_message['images'] = images_b64
-            messages_for_api[-1] = api_user_message
 
     try:
         stream = ollama.chat(model=final_model, messages=messages_for_api, stream=True)
@@ -302,13 +320,14 @@ def get_chat_response(chat_id):
                         content_piece = chunk['message']['content']
                         full_response_content += content_piece
                         yield content_piece
-                
-                ai_message_dict = {'role': 'assistant', 'content': full_response_content, 'model': final_model}
-                current_chat_data = load_chat_history(chat_id)
-                current_chat_data['messages'].append(ai_message_dict)
-                save_chat_history(chat_id, current_chat_data)
-            except Exception as e:
-                print(f"Error during response generation stream for chat {chat_id}: {e}")
+            finally:
+                # THE FIX: This block executes even if the client disconnects.
+                if full_response_content:
+                    print(f"Saving partial/full response of length {len(full_response_content)} for chat {chat_id}")
+                    ai_message_dict = {'role': 'assistant', 'content': full_response_content, 'model': final_model}
+                    current_chat_data = load_chat_history(chat_id)
+                    current_chat_data['messages'].append(ai_message_dict)
+                    save_chat_history(chat_id, current_chat_data)
 
         return Response(generate(), mimetype='text/plain')
     except Exception as e:
@@ -336,8 +355,6 @@ def delete_message(chat_id, msg_index):
     save_chat_history(chat_id, chat_data)
     return jsonify({"success": True})
 
-# in app.py
-
 @app.route('/api/chat/<chat_id>/regenerate', methods=['POST'])
 def regenerate_response(chat_id):
     data = request.json
@@ -349,19 +366,18 @@ def regenerate_response(chat_id):
     chat_data = load_chat_history(chat_id)
     if not chat_data:
         return jsonify({"error": "Chat not found"}), 404
-    if not (0 < msg_index < len(chat_data['messages']) and chat_data['messages'][msg_index]['role'] == 'assistant'):
+    if not (0 <= msg_index < len(chat_data['messages']) and chat_data['messages'][msg_index]['role'] == 'assistant'):
         return jsonify({"error": "Invalid index for regeneration."}), 400
     
-    # THE FIX: Context is all messages *before* the one being regenerated
-    messages_for_api = chat_data['messages'][:msg_index]
+    messages_to_process = chat_data['messages'][:msg_index]
+    messages_for_api = prepare_messages_for_llm(messages_to_process)
     
-    last_user_msg = messages_for_api[-1]
     final_model = model
-
-    if 'attachments' in last_user_msg:
-        api_user_message = last_user_msg.copy()
+    last_user_msg_original = chat_data['messages'][msg_index - 1]
+    if 'attachments' in last_user_msg_original:
+        api_user_message = messages_for_api[-1]
         images_b64 = []
-        for att in api_user_message.get('attachments', []):
+        for att in last_user_msg_original.get('attachments', []):
             if att.get('type', '').startswith('image/'):
                 final_model = FIXED_VISION_MODEL
                 try:
@@ -373,9 +389,7 @@ def regenerate_response(chat_id):
                     print(f"Error reading attachment {att['url']}: {e}")
         if images_b64: 
             api_user_message['images'] = images_b64
-            messages_for_api[-1] = api_user_message
     
-    # THE FIX: This endpoint now streams the response
     try:
         stream = ollama.chat(model=final_model, messages=messages_for_api, stream=True)
         def generate():
@@ -386,21 +400,18 @@ def regenerate_response(chat_id):
                         content_piece = chunk['message']['content']
                         full_response_content += content_piece
                         yield content_piece
-                
-                # After streaming, update the history with the final message
-                ai_message_dict = {
-                    'role': 'assistant',
-                    'content': full_response_content,
-                    'model': final_model
-                }
-                
-                # Reload chat data to prevent race conditions before saving
-                current_chat_data = load_chat_history(chat_id)
-                current_chat_data['messages'][msg_index] = ai_message_dict # Replace the old message
-                save_chat_history(chat_id, current_chat_data)
-
-            except Exception as e:
-                print(f"Error during regeneration stream for chat {chat_id}: {e}")
+            finally:
+                # THE FIX: This block executes even if the client disconnects.
+                if full_response_content:
+                    print(f"Saving partial/full regenerated response of length {len(full_response_content)} for chat {chat_id}")
+                    ai_message_dict = {
+                        'role': 'assistant',
+                        'content': full_response_content,
+                        'model': final_model
+                    }
+                    current_chat_data = load_chat_history(chat_id)
+                    current_chat_data['messages'][msg_index] = ai_message_dict
+                    save_chat_history(chat_id, current_chat_data)
 
         return Response(generate(), mimetype='text/plain')
     except Exception as e:
@@ -424,17 +435,17 @@ def edit_and_regenerate(chat_id):
         return jsonify({"error": "Invalid index for edit."}), 400
 
     chat_data['messages'][msg_index]['content'] = new_prompt
-    
     chat_data['messages'] = chat_data['messages'][:msg_index + 1]
         
-    messages_for_api = chat_data['messages']
+    messages_to_process = chat_data['messages']
+    messages_for_api = prepare_messages_for_llm(messages_to_process)
     
-    last_user_msg = messages_for_api[-1]
     final_model = model
-    if 'attachments' in last_user_msg:
-        api_user_message = last_user_msg.copy()
+    last_user_msg_original = chat_data['messages'][-1]
+    if 'attachments' in last_user_msg_original:
+        api_user_message = messages_for_api[-1]
         images_b64 = []
-        for att in api_user_message.get('attachments', []):
+        for att in last_user_msg_original.get('attachments', []):
             if att.get('type', '').startswith('image/'):
                 final_model = FIXED_VISION_MODEL
                 try:
@@ -446,7 +457,6 @@ def edit_and_regenerate(chat_id):
                     print(f"Error reading attachment {att['url']}: {e}")
         if images_b64: 
             api_user_message['images'] = images_b64
-            messages_for_api[-1] = api_user_message
 
     try:
         response = ollama.chat(model=final_model, messages=messages_for_api)
