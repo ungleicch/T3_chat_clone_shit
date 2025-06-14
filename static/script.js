@@ -186,7 +186,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
         try {
             if (!chatIdToUse) {
-                // This is a NEW chat, use the initiate endpoint
                 const initResponse = await fetch('/api/chat/initiate', {
                     method: 'POST',
                     body: formData,
@@ -197,12 +196,23 @@ document.addEventListener('DOMContentLoaded', () => {
                 
                 chatIdToUse = initData.chatId;
                 currentChatId = initData.chatId;
-                await loadChatList();
+                
+                addChatToList(initData.chatId, initData.title, true);
                 updateActiveChatItem(currentChatId);
                 renderMessage(initData.user_message, 0);
+                
+                fetch(`/api/chat/${chatIdToUse}/generate_title`, { method: 'POST' })
+                    .then(res => res.json())
+                    .then(titleData => {
+                        if (titleData.newTitle) {
+                            const chatListItem = document.querySelector(`.chat-list-item[data-chat-id="${titleData.chatId}"] .chat-title`);
+                            if (chatListItem) {
+                                chatListItem.textContent = titleData.newTitle;
+                            }
+                        }
+                    }).catch(err => console.error("Could not generate title in background:", err));
+
             } else {
-                // This is an EXISTING chat.
-                // Step 1: Securely add the user's message to the backend history.
                 const addMsgResponse = await fetch(`/api/chat/${chatIdToUse}/add_message`, {
                     method: 'POST',
                     body: formData,
@@ -214,9 +224,11 @@ document.addEventListener('DOMContentLoaded', () => {
                 const userMsgIndex = document.querySelectorAll('.message-container').length;
                 renderMessage(addMsgData.user_message, userMsgIndex);
             }
-
-            // Step 2: Now that the message is saved, ask the AI for a response.
-            await streamAndRenderResponse(chatIdToUse, model);
+            
+            const endpoint = `/api/chat/${chatIdToUse}/respond`;
+            const payload = { model };
+            const msgIndex = document.querySelectorAll('.message-container').length;
+            await executeStream(endpoint, 'POST', payload, msgIndex);
 
         } catch (error) {
             if (error.name !== 'AbortError') {
@@ -229,16 +241,22 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     };
     
-    async function streamAndRenderResponse(chatId, model) {
-        const aiMsgIndex = document.querySelectorAll('.message-container').length;
-        const aiMessageContainer = renderMessage({ role: 'assistant', content: '', model: model }, aiMsgIndex, true);
+    /**
+     * The single, robust function for handling all streaming AI responses.
+     */
+    async function executeStream(endpoint, method, body, msgIndex) {
+        const model = body.model;
+        const aiMessageContainer = renderMessage({ role: 'assistant', content: '', model: model }, msgIndex, true);
         const contentDiv = aiMessageContainer.querySelector('.message-content');
         
+        const scrollBuffer = 50; 
+        let fullContent = "";
+
         try {
-            const response = await fetch(`/api/chat/${chatId}/respond`, {
-                method: 'POST',
+            const response = await fetch(endpoint, {
+                method: method,
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({ model }),
+                body: JSON.stringify(body),
                 signal: currentAbortController.signal
             });
 
@@ -246,31 +264,38 @@ document.addEventListener('DOMContentLoaded', () => {
 
             const reader = response.body.getReader();
             const decoder = new TextDecoder();
-            let fullContent = "";
             
             while(true) {
+                const isScrolledToBottom = chatWindow.scrollHeight - chatWindow.clientHeight <= chatWindow.scrollTop + scrollBuffer;
+
                 const { value, done } = await reader.read();
                 if (done) break;
                 
                 fullContent += decoder.decode(value, { stream: true });
+                // Use marked.js to render live formatting. This will disrupt text selection.
                 contentDiv.innerHTML = marked.parse(fullContent + '<span class="loading-pulse"></span>');
-                chatWindow.scrollTop = chatWindow.scrollHeight;
+                
+                if (isScrolledToBottom) {
+                    chatWindow.scrollTop = chatWindow.scrollHeight;
+                }
             }
             
+            // Final render to apply syntax highlighting and copy buttons
             aiMessageContainer.remove();
-            const finalMessage = { role: 'assistant', content: fullContent, model: model };
-            renderMessage(finalMessage, aiMsgIndex);
-            if (document.querySelectorAll('.message-container').length <= 2) {
-                 await loadChatList();
+            const finalMessageContainer = renderMessage({ role: 'assistant', content: fullContent, model: model }, msgIndex);
+            
+            const isScrolledToBottomAfterRender = chatWindow.scrollHeight - chatWindow.clientHeight <= chatWindow.scrollTop + scrollBuffer;
+            if (isScrolledToBottomAfterRender) {
+                finalMessageContainer.scrollIntoView({ behavior: 'auto', block: 'end' });
             }
 
         } catch (error) {
             aiMessageContainer.remove();
             if (error.name === 'AbortError') {
-                renderMessage({role: 'assistant', content: '*Request cancelled by user.*'}, aiMsgIndex);
+                renderMessage({role: 'assistant', content: '*Request cancelled by user.*'}, msgIndex);
             } else {
                 console.error("Response streaming error:", error);
-                renderMessage({role: 'assistant', content: `**Error:** ${error.message}`}, aiMsgIndex);
+                renderMessage({role: 'assistant', content: `**Error:** ${error.message}`}, msgIndex);
             }
         }
     }
@@ -300,10 +325,8 @@ document.addEventListener('DOMContentLoaded', () => {
             });
             const data = await response.json();
             
-            // This endpoint returns the whole history. We reload the chat.
             if (!response.ok) throw new Error(data.error || "Failed to edit and regenerate.");
             
-            // Reload the entire chat history to reflect the changes.
             await loadChatHistory(editState.chatId);
 
         } catch (error) {
@@ -347,7 +370,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const response = await fetch(`/api/chat/${chatId}/message/${msgIndex}`, { method: 'DELETE' });
             if (!response.ok) throw new Error((await response.json()).error || 'Failed to delete message.');
             
-            await loadChatHistory(chatId); // Easiest way to ensure consistency
+            await loadChatHistory(chatId);
 
         } catch (error) {
             console.error(error);
@@ -355,70 +378,32 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     };
 
-    // in script.js
-
-    // in script.js
-
     const handleRegenerateMessage = async (chatId, msgIndex, modelToUse = null) => {
-        const messageContainer = document.querySelector(`.message-container[data-msg-index="${msgIndex}"]`);
-        if (!messageContainer) return;
-        
-        // Abort any other ongoing requests
         if (currentAbortController) {
             currentAbortController.abort();
         }
         currentAbortController = new AbortController();
         stopGeneratingBtn.classList.remove('hidden');
 
-        const originalModel = messageContainer.querySelector('.model-tag')?.textContent;
-        const model = modelToUse || originalModel || modelSelector.value;
+        const originalModel = modelToUse || document.querySelector(`.message-container[data-msg-index="${msgIndex}"] .model-tag`)?.textContent || modelSelector.value;
         
-        // --- Step 1: Replace the old message with a new "loading" placeholder ---
-        // This clears the old content and prepares for the new stream.
-        const loadingMessageContainer = renderMessage({ role: 'assistant', content: '', model: model }, msgIndex, true);
-        const contentDiv = loadingMessageContainer.querySelector('.message-content');
+        const allMessages = Array.from(document.querySelectorAll('.message-container'));
+        const messagesToRemove = allMessages.slice(msgIndex);
+        messagesToRemove.forEach(msg => msg.remove());
         
+        const endpoint = `/api/chat/${chatId}/regenerate`;
+        const payload = { model: originalModel, msg_index: msgIndex };
+
         try {
-            // --- Step 2: Fetch the new STREAMING response ---
-            const response = await fetch(`/api/chat/${chatId}/regenerate`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ model: model, msg_index: msgIndex }),
-                signal: currentAbortController.signal,
-            });
-
-            if (!response.ok) throw new Error(await response.text());
-
-            const reader = response.body.getReader();
-            const decoder = new TextDecoder();
-            let fullContent = "";
-            
-            // --- Step 3: Stream the content into the placeholder ---
-            while(true) {
-                const { value, done } = await reader.read();
-                if (done) break;
-                
-                fullContent += decoder.decode(value, { stream: true });
-                contentDiv.innerHTML = marked.parse(fullContent + '<span class="loading-pulse"></span>');
-                chatWindow.scrollTop = chatWindow.scrollHeight;
-            }
-            
-            // --- Step 4: Render the final, complete message ---
-            loadingMessageContainer.remove(); // Remove the placeholder
-            const finalMessage = { role: 'assistant', content: fullContent, model: model };
-            renderMessage(finalMessage, msgIndex); // Render the final version
-
-        } catch (error) {
-            loadingMessageContainer.remove(); // Remove placeholder on error too
-            if (error.name === 'AbortError') {
-                 renderMessage({role: 'assistant', content: '*Request cancelled by user.*'}, msgIndex);
-            } else {
-                console.error("Regeneration failed:", error);
-                renderMessage({role: 'assistant', content: `**Error regenerating:** ${error.message}`}, msgIndex);
+            await executeStream(endpoint, 'POST', payload, msgIndex);
+        } catch(error) {
+            if (error.name !== 'AbortError') {
+                 console.error("Regeneration failed:", error);
+                 renderMessage({role: 'assistant', content: `**Error regenerating:** ${error.message}`}, msgIndex);
             }
         } finally {
-            stopGeneratingBtn.classList.add('hidden');
-            currentAbortController = null;
+             stopGeneratingBtn.classList.add('hidden');
+             currentAbortController = null;
         }
     };
     
@@ -478,6 +463,9 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         if (!isLoading) {
+            messageContent.querySelectorAll('pre code').forEach((block) => {
+                hljs.highlightElement(block);
+            });
             messageContent.querySelectorAll('pre').forEach(pre => {
                 const copyButton = document.createElement('button');
                 copyButton.className = 'copy-code-btn';
@@ -544,7 +532,7 @@ document.addEventListener('DOMContentLoaded', () => {
         } else {
             chatWindow.appendChild(container);
         }
-        chatWindow.scrollTop = chatWindow.scrollHeight;
+        
         return container;
     };
     

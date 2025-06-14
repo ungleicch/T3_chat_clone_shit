@@ -180,6 +180,31 @@ def get_chat_history_route(chat_id):
         abort(404, "Chat not found")
     return jsonify(chat_data)
 
+@app.route('/api/chat/<chat_id>/generate_title', methods=['POST'])
+def generate_title_for_chat(chat_id):
+    chat_data = load_chat_history(chat_id)
+    if not chat_data or not chat_data.get('messages'):
+        return jsonify({"error": "Chat not found or is empty."}), 404
+        
+    # Find the first user message to generate the title from.
+    first_user_prompt = ""
+    for message in chat_data['messages']:
+        if message['role'] == 'user':
+            first_user_prompt = message['content']
+            break
+            
+    if not first_user_prompt:
+        return jsonify({"title": "Untitled Chat"}) # Nothing to generate from
+
+    # Generate the real title.
+    new_title = generate_chat_title(first_user_prompt)
+    
+    # Save the new title to the chat history file.
+    chat_data['title'] = new_title
+    save_chat_history(chat_id, chat_data)
+    
+    return jsonify({"chatId": chat_id, "newTitle": new_title})
+
 @app.route('/api/chat/initiate', methods=['POST'])
 def initiate_chat():
     data = request.form
@@ -191,21 +216,23 @@ def initiate_chat():
 
     chat_id = str(uuid.uuid4())
     
+    # THE FIX: Use a temporary title immediately.
+    title = "New Chat" 
+    
     attachments_data, extracted_text = process_and_save_files(chat_id, files)
     full_prompt = f"{prompt}\n\n{extracted_text}".strip()
-
-    title = generate_chat_title(prompt) if prompt else "Attachment Analysis"
 
     user_message = {"role": "user", "content": full_prompt}
     if attachments_data:
         user_message["attachments"] = attachments_data
 
+    # Save with the temporary title first.
     chat_data = {"title": title, "messages": [user_message]}
     save_chat_history(chat_id, chat_data)
 
     return jsonify({
         "chatId": chat_id,
-        "title": title,
+        "title": title, # Return the temporary title
         "user_message": user_message
     })
 
